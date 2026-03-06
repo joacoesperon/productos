@@ -1,0 +1,183 @@
+import { NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
+import { stripe } from '@/lib/stripe/client'
+import { generateUniqueLicenseKey } from '@/lib/licenses/generate'
+import { addDays } from 'date-fns'
+import { z } from 'zod'
+
+const bodySchema = z.object({
+  productId: z.string().uuid(),
+  planId: z.string().uuid(),
+  couponCode: z.string().optional(),
+})
+
+export async function POST(request: Request) {
+  // 1. Authenticate user
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // 2. Parse and validate body
+  const body = await request.json().catch(() => null)
+  const parsed = bodySchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  }
+  const { productId, planId, couponCode } = parsed.data
+
+  // 3. Fetch product + plan
+  const { data: product } = await supabase
+    .from('products')
+    .select('id, name, short_description, thumbnail_url')
+    .eq('id', productId)
+    .eq('status', 'published')
+    .single()
+
+  if (!product) {
+    return NextResponse.json({ error: 'Product not found' }, { status: 404 })
+  }
+
+  const { data: plan } = await supabase
+    .from('license_plans')
+    .select('*')
+    .eq('id', planId)
+    .eq('product_id', productId)
+    .eq('is_active', true)
+    .single()
+
+  if (!plan) {
+    return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+  }
+
+  // 4. Handle free trial — no Stripe needed
+  if (plan.price === 0 || plan.type === 'trial') {
+    const supabaseAdmin = createAdminClient()
+
+    const licenseKey = await generateUniqueLicenseKey(async (key) => {
+      const { data } = await supabaseAdmin
+        .from('licenses')
+        .select('id')
+        .eq('license_key', key)
+        .single()
+      return !!data
+    })
+
+    if (!licenseKey) {
+      return NextResponse.json({ error: 'Failed to generate license key' }, { status: 500 })
+    }
+
+    const expiresAt = plan.trial_days
+      ? addDays(new Date(), plan.trial_days).toISOString()
+      : null
+
+    const { data: order } = await supabaseAdmin.from('orders').insert({
+      user_id: user.id,
+      status: 'completed' as const,
+      total_amount: 0,
+      discount_amount: 0,
+    }).select('id').single()
+
+    if (order) {
+      const { data: orderItem } = await supabaseAdmin.from('order_items').insert({
+        order_id: order.id,
+        product_id: productId,
+        license_plan_id: planId,
+        price: 0,
+      }).select('id').single()
+
+      if (orderItem) {
+        await supabaseAdmin.from('licenses').insert({
+          license_key: licenseKey,
+          user_id: user.id,
+          product_id: productId,
+          license_plan_id: planId,
+          order_item_id: orderItem.id,
+          status: 'trial' as const,
+          type: 'trial' as const,
+          max_activations: plan.max_activations,
+          expires_at: expiresAt,
+        })
+
+        await supabaseAdmin.from('license_events').insert({
+          license_id: (await supabaseAdmin.from('licenses').select('id').eq('license_key', licenseKey).single()).data?.id ?? '',
+          event_type: 'issued' as const,
+          metadata: { plan_type: 'trial', order_id: order.id },
+        })
+      }
+    }
+
+    return NextResponse.json({ licenseKey })
+  }
+
+  // 5. Validate coupon if provided
+  let discountAmount = 0
+  let couponId: string | null = null
+
+  if (couponCode) {
+    const now = new Date().toISOString()
+    const { data: coupon } = await supabase
+      .from('coupons')
+      .select('*')
+      .eq('code', couponCode.toUpperCase())
+      .eq('is_active', true)
+      .single()
+
+    if (
+      coupon &&
+      (!coupon.expires_at || coupon.expires_at > now) &&
+      (!coupon.max_uses || coupon.used_count < coupon.max_uses) &&
+      (!coupon.min_order_amount || plan.price >= coupon.min_order_amount)
+    ) {
+      couponId = coupon.id
+      if (coupon.type === 'percentage') {
+        discountAmount = Math.round(plan.price * (coupon.value / 100))
+      } else {
+        discountAmount = Math.min(coupon.value, plan.price)
+      }
+    }
+  }
+
+  const unitAmount = Math.max(0, plan.price - discountAmount)
+
+  // 6. Create Stripe Checkout Session
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
+
+  const isSubscription = plan.type === 'subscription'
+
+  const session = await stripe.checkout.sessions.create({
+    mode: isSubscription ? 'subscription' : 'payment',
+    line_items: [
+      {
+        price_data: {
+          currency: plan.currency,
+          unit_amount: unitAmount,
+          ...(isSubscription && {
+            recurring: { interval: (plan.billing_interval ?? 'month') as 'month' | 'year' },
+          }),
+          product_data: {
+            name: `${product.name} — ${plan.name}`,
+            description: product.short_description ?? undefined,
+            images: product.thumbnail_url ? [product.thumbnail_url] : [],
+          },
+        },
+        quantity: 1,
+      },
+    ],
+    success_url: `${siteUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${siteUrl}/checkout/cancel`,
+    customer_email: user.email,
+    metadata: {
+      user_id: user.id,
+      product_id: productId,
+      license_plan_id: planId,
+      coupon_id: couponId ?? '',
+      discount_amount: String(discountAmount),
+    },
+  })
+
+  return NextResponse.json({ url: session.url })
+}

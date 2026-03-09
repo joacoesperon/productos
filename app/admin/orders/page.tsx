@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Badge } from '@/components/ui/badge'
 import {
   Table,
@@ -23,7 +23,7 @@ export default async function AdminOrdersPage({
   searchParams: Promise<SearchParams>
 }) {
   const { status } = await searchParams
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   let query = supabase
     .from('orders')

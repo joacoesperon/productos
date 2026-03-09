@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createServiceClient } from '@/lib/supabase/server'
 import {
   LayoutDashboard,
   Package,
@@ -31,7 +31,8 @@ export default async function AdminLayout({
 
   if (!user) redirect('/auth/login')
 
-  const { data: profile } = await supabase
+  const serviceClient = createServiceClient()
+  const { data: profile } = await serviceClient
     .from('profiles')
     .select('role')
     .eq('id', user.id)
@@ -50,7 +51,13 @@ export default async function AdminLayout({
         </div>
         <nav className="flex flex-col gap-1 px-2">
           {navItems.map((item) => (
-            <AdminNavLink key={item.href} {...item} />
+            <AdminNavLink
+              key={item.href}
+              href={item.href}
+              label={item.label}
+              exact={item.exact}
+              icon={<item.icon className="h-4 w-4 shrink-0" />}
+            />
           ))}
         </nav>
       </aside>

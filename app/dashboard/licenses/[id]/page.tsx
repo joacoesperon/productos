@@ -1,15 +1,18 @@
 import { notFound } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createServiceClient } from '@/lib/supabase/server'
 import LicenseKeyDisplay from '@/components/licenses/LicenseKeyDisplay'
 import ActivationList from '@/components/licenses/ActivationList'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { formatDate, formatDateTime } from '@/lib/utils/formatters'
 import { LICENSE_STATUS_LABELS, LICENSE_STATUS_COLORS } from '@/types'
 import type { LicenseWithActivations } from '@/types'
-import { Monitor, Calendar, Package, ArrowLeft } from 'lucide-react'
+import { Monitor, Calendar, Package, ArrowLeft, Download, PlayCircle } from 'lucide-react'
 import Link from 'next/link'
+
+type ProductType = 'software' | 'ebook' | 'course' | 'template'
 
 export default async function LicenseDetailPage({
   params,
@@ -20,11 +23,12 @@ export default async function LicenseDetailPage({
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  const { data } = await supabase
+  const serviceClient = createServiceClient()
+  const { data } = await serviceClient
     .from('licenses')
     .select(`
       *,
-      products(id, name, slug, thumbnail_url),
+      products(id, name, slug, thumbnail_url, file_path, type),
       license_plans(id, name, type, max_activations),
       license_activations(*)
     `)
@@ -34,10 +38,20 @@ export default async function LicenseDetailPage({
 
   if (!data) notFound()
 
-  const license = data as unknown as LicenseWithActivations
+  const license = data as unknown as LicenseWithActivations & {
+    products: { file_path: string | null; type: ProductType; slug: string }
+  }
+
+  const productType: ProductType = license.products.type
+  const isSoftware = productType === 'software'
+  const isCourse = productType === 'course'
+  const isDownloadable = productType === 'ebook' || productType === 'template'
+
   const statusLabel = LICENSE_STATUS_LABELS[license.status] ?? license.status
   const statusColor = LICENSE_STATUS_COLORS[license.status] ?? ''
-  const canDeactivate = license.status === 'active' || license.status === 'trial'
+  const isActive = license.status === 'active' || license.status === 'trial'
+  const hasFile = !!(license.products as unknown as { file_path: string | null }).file_path
+  const canDownload = hasFile && isActive
 
   return (
     <div className="space-y-6">
@@ -57,8 +71,30 @@ export default async function LicenseDetailPage({
         </Badge>
       </div>
 
-      {/* License key */}
-      <LicenseKeyDisplay licenseKey={license.license_key} status={license.status} />
+      {/* Course: Go to course button */}
+      {isCourse && isActive && (
+        <Button asChild size="lg" className="w-full sm:w-auto gap-2">
+          <Link href={`/dashboard/courses/${license.product_id}`}>
+            <PlayCircle className="h-4 w-4" />
+            Go to course
+          </Link>
+        </Button>
+      )}
+
+      {/* Software / Ebook / Template: Download button */}
+      {(isSoftware || isDownloadable) && canDownload && (
+        <Button asChild size="lg" className="w-full sm:w-auto gap-2">
+          <a href={`/api/downloads/${license.product_id}`}>
+            <Download className="h-4 w-4" />
+            Download product
+          </a>
+        </Button>
+      )}
+
+      {/* Software only: License key */}
+      {isSoftware && (
+        <LicenseKeyDisplay licenseKey={license.license_key} status={license.status} />
+      )}
 
       {/* License details */}
       <Card>
@@ -73,14 +109,21 @@ export default async function LicenseDetailPage({
               {license.license_plans.name} · {license.license_plans.type}
             </span>
           </div>
-          <Separator />
-          <div className="flex items-center gap-3 text-sm">
-            <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-muted-foreground">Activations</span>
-            <span className="ml-auto font-medium">
-              {license.activation_count} / {license.max_activations}
-            </span>
-          </div>
+
+          {/* Activations only for software */}
+          {isSoftware && (
+            <>
+              <Separator />
+              <div className="flex items-center gap-3 text-sm">
+                <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-muted-foreground">Activations</span>
+                <span className="ml-auto font-medium">
+                  {license.activation_count} / {license.max_activations}
+                </span>
+              </div>
+            </>
+          )}
+
           {license.expires_at && (
             <>
               <Separator />
@@ -100,15 +143,17 @@ export default async function LicenseDetailPage({
         </CardContent>
       </Card>
 
-      {/* Activations */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">Active Devices</h2>
-        <ActivationList
-          activations={license.license_activations}
-          licenseKey={license.license_key}
-          canDeactivate={canDeactivate}
-        />
-      </div>
+      {/* Active Devices — software only */}
+      {isSoftware && (
+        <div>
+          <h2 className="text-lg font-semibold mb-3">Active Devices</h2>
+          <ActivationList
+            activations={license.license_activations}
+            licenseKey={license.license_key}
+            canDeactivate={isActive}
+          />
+        </div>
+      )}
     </div>
   )
 }

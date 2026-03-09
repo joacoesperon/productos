@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,7 +27,7 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 export default async function AdminProductsPage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data: products } = await supabase
     .from('products')

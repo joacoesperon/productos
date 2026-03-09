@@ -36,7 +36,7 @@ export default async function Header() {
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 font-bold text-lg">
           <ShieldCheck className="h-5 w-5 text-primary" />
-          LicenseHub
+          DigiStore
         </Link>
 
         {/* Nav links */}

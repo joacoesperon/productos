@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import {
   Table,
   TableBody,
@@ -12,7 +12,7 @@ import { formatDate } from '@/lib/utils/formatters'
 import type { Profile } from '@/types'
 
 export default async function AdminCustomersPage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data } = await supabase
     .from('profiles')

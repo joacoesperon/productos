@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation'
 import Image from 'next/image'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import PlanSelector from '@/components/store/PlanSelector'
@@ -11,7 +11,7 @@ type ProductWithPlans = Product & { license_plans: LicensePlan[] }
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
-  const supabase = await createClient()
+  const supabase = createServiceClient()
   const { data: product } = await supabase
     .from('products')
     .select('name, short_description')
@@ -32,7 +32,7 @@ export default async function ProductDetailPage({
   params: Promise<{ slug: string }>
 }) {
   const { slug } = await params
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data: product } = await supabase
     .from('products')

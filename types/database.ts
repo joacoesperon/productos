@@ -52,6 +52,7 @@ export type Database = {
           type: 'software' | 'ebook' | 'course' | 'template'
           status: 'draft' | 'published' | 'archived'
           thumbnail_url: string | null
+          file_path: string | null
           created_at: string
           updated_at: string
         }
@@ -64,6 +65,7 @@ export type Database = {
           type: 'software' | 'ebook' | 'course' | 'template'
           status?: 'draft' | 'published' | 'archived'
           thumbnail_url?: string | null
+          file_path?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -76,6 +78,7 @@ export type Database = {
           type?: 'software' | 'ebook' | 'course' | 'template'
           status?: 'draft' | 'published' | 'archived'
           thumbnail_url?: string | null
+          file_path?: string | null
           created_at?: string
           updated_at?: string
         }

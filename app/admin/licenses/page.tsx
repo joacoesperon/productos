@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Badge } from '@/components/ui/badge'
 import {
   Table,
@@ -25,7 +25,7 @@ export default async function AdminLicensesPage({
   searchParams: Promise<SearchParams>
 }) {
   const { status, q } = await searchParams
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   let query = supabase
     .from('licenses')

@@ -4,12 +4,12 @@ import { createServerClient } from '@supabase/ssr'
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get('code')
-  const next = searchParams.get('next') ?? '/'
-  const redirectTo = searchParams.get('redirectTo') ?? '/dashboard'
+  const destination =
+    searchParams.get('next') ?? searchParams.get('redirectTo') ?? '/dashboard'
 
   if (code) {
     let supabaseResponse = NextResponse.redirect(
-      new URL(redirectTo ?? next, request.url)
+      new URL(destination, request.url)
     )
 
     const supabase = createServerClient(
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
               request.cookies.set(name, value)
             )
             supabaseResponse = NextResponse.redirect(
-              new URL(redirectTo ?? next, request.url)
+              new URL(destination, request.url)
             )
             cookiesToSet.forEach(({ name, value, options }) =>
               supabaseResponse.cookies.set(name, value, options)

@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Badge } from '@/components/ui/badge'
 import {
   Table,
@@ -14,7 +14,7 @@ import CreateCouponDialog from '@/components/admin/CreateCouponDialog'
 import ToggleCouponButton from '@/components/admin/ToggleCouponButton'
 
 export default async function AdminCouponsPage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data } = await supabase
     .from('coupons')

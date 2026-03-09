@@ -18,7 +18,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Separator } from '@/components/ui/separator'
 import { ShieldCheck } from 'lucide-react'
+import GoogleButton from '@/components/auth/GoogleButton'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -57,7 +59,15 @@ export default function LoginPage() {
           <CardTitle className="text-2xl">Sign in</CardTitle>
           <CardDescription>Enter your credentials to access your account</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          <GoogleButton mode="login" />
+
+          <div className="flex items-center gap-3">
+            <Separator className="flex-1" />
+            <span className="text-xs text-muted-foreground">or</span>
+            <Separator className="flex-1" />
+          </div>
+
           <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <FormField
@@ -78,7 +88,15 @@ export default function LoginPage() {
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Password</FormLabel>
+                    <div className="flex items-center justify-between">
+                      <FormLabel>Password</FormLabel>
+                      <Link
+                        href="/auth/forgot-password"
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        Forgot password?
+                      </Link>
+                    </div>
                     <FormControl>
                       <Input type="password" placeholder="••••••••" autoComplete="current-password" {...field} />
                     </FormControl>
@@ -86,16 +104,13 @@ export default function LoginPage() {
                   </FormItem>
                 )}
               />
-              <Button
-                type="submit"
-                className="w-full"
-                disabled={form.formState.isSubmitting}
-              >
+              <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
                 {form.formState.isSubmitting ? 'Signing in…' : 'Sign in'}
               </Button>
             </form>
           </Form>
-          <p className="mt-4 text-center text-sm text-muted-foreground">
+
+          <p className="text-center text-sm text-muted-foreground">
             Don&apos;t have an account?{' '}
             <Link href="/auth/register" className="font-medium text-primary hover:underline">
               Create one

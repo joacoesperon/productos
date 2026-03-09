@@ -366,3 +366,36 @@ Los trials son gratuitos — no hay nada que cobrar. La ruta `/api/checkout` det
 
 ### Formato de license key
 `XXXXX-XXXXX-XXXXX-XXXXX` — 20 caracteres hex en mayúsculas, agrupados en 4 bloques. La clave NO codifica metadatos (a diferencia de JWT o claves con checksum). Toda la semántica vive en la DB, lo que permite revocar, transferir o modificar licencias sin invalidad la clave.
+
+---
+
+## Sesión 3 — Rebrand + entrega de archivos + Google OAuth + páginas legales
+
+### Rebrand LicenseHub → DigiStore
+`sed -i 's/LicenseHub/DigiStore/g'` sobre todos los `.tsx`, `.ts` y `.md`. Afectó: `Header`, `Footer`, `app/layout.tsx`, `terms/page.tsx`, `app/auth/register/page.tsx`.
+
+### Google OAuth — `components/auth/GoogleButton.tsx`
+Componente cliente reutilizable. Llama `supabase.auth.signInWithOAuth({ provider: 'google' })`. Redirige a Supabase callback y luego al `redirectTo` original. Añadido a `/auth/login` y `/auth/register` con separador "or". Google OAuth es gratis; los $300 de crédito de GCP son para otros servicios.
+
+### Pages legales — `app/terms/page.tsx` + `app/privacy/page.tsx`
+Terms of Service incluye sección destacada (fondo ámbar) con exención de responsabilidad explícita para productos de trading algorítmico. Footer actualizado con links.
+
+### `middleware.ts` → `proxy.ts` (Next.js 16)
+Next.js 16 deprecó el nombre `middleware` en favor de `proxy`. Migrado con el codemod oficial: `npx @next/codemod@canary middleware-to-proxy .`. La función también se renombró de `middleware()` a `proxy()`.
+
+### Entrega de archivos — flujo completo
+**`types/database.ts`**: campo `file_path: string | null` añadido a `products` (Row, Insert, Update).
+
+**`components/admin/FileUpload.tsx`**: componente drag & drop para upload a Supabase Storage bucket `product-files` (privado). Acepta PDF, ZIP, PY, EX4/EX5, EXE y más. Límite 200MB. Si hay archivo existente, lo reemplaza antes de subir el nuevo.
+
+**`components/admin/ProductForm.tsx`**: integra `FileUpload`. El archivo se sube directamente desde el cliente a Storage; el `file_path` resultante se pasa como segundo argumento al server action `onSubmit(values, filePath)`. Para productos nuevos (sin `id` todavía), el campo de upload muestra el mensaje "primero guarda el producto".
+
+**`app/admin/products/new/page.tsx`** y **`[id]/edit/page.tsx`**: server actions actualizados para aceptar `filePath: string | null` y guardarlo en `products.file_path`.
+
+**`app/api/downloads/[productId]/route.ts`**: `GET` protegido. Verifica sesión → busca `file_path` del producto → verifica que el usuario tiene licencia `active` o `trial` para ese producto → genera URL firmada de Supabase Storage (expira en 1 hora, fuerza descarga) → redirige. Sin URL firmada válida el archivo es inaccesible.
+
+**`app/dashboard/licenses/[id]/page.tsx`**: añadido botón "Download product" que aparece solo cuando la licencia está activa/trial y el producto tiene archivo. Llama al endpoint de descarga.
+
+**`supabase/migration.sql`** (append): `ALTER TABLE products ADD COLUMN IF NOT EXISTS file_path TEXT`. El bucket `product-files` hay que crearlo manualmente en Supabase Dashboard → Storage (privado, sin acceso público).
+
+**`README.md`**: reescrito completamente. Describe DigiStore como tienda de productos digitales. Incluye ejemplos de integración en Python y MQL5 para verificación de licencias.

@@ -285,3 +285,19 @@ create policy "Admin manages all reviews"
   on reviews for all using (
     exists (select 1 from profiles where id = auth.uid() and role = 'admin')
   );
+
+-- ─── File delivery ────────────────────────────────────────────────────────────
+-- Run this after the initial migration if upgrading an existing database
+
+alter table products
+  add column if not exists file_path text;          -- path in Supabase Storage bucket 'product-files'
+
+-- Storage bucket (run in Supabase Dashboard → Storage, or via SQL):
+-- insert into storage.buckets (id, name, public)
+--   values ('product-files', 'product-files', false)
+--   on conflict do nothing;
+
+-- RLS for storage: only authenticated users with a valid license can read
+-- This is handled via the signed URL API route — the bucket stays private.
+
+-- Allow service_role to manage files (handled automatically by Supabase)

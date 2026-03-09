@@ -6,7 +6,7 @@ import type { ProductFormValues } from '@/lib/utils/validators'
 import Link from 'next/link'
 import { ChevronLeft } from 'lucide-react'
 
-async function createProduct(values: ProductFormValues): Promise<{ error?: string }> {
+async function createProduct(values: ProductFormValues, filePath: string | null): Promise<{ error?: string }> {
   'use server'
   const supabase = createAdminClient()
 
@@ -20,6 +20,7 @@ async function createProduct(values: ProductFormValues): Promise<{ error?: strin
     type: values.type,
     status: values.status,
     thumbnail_url: thumbnailUrl ?? null,
+    file_path: filePath ?? null,
   })
 
   if (error) {

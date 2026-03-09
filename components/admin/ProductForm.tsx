@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useRouter } from 'next/navigation'
@@ -22,17 +23,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
 import { productSchema, type ProductFormValues } from '@/lib/utils/validators'
 import { toSlug } from '@/lib/utils/formatters'
 import type { Product } from '@/types'
+import FileUpload from './FileUpload'
 
 interface ProductFormProps {
   product?: Product
-  onSubmit: (values: ProductFormValues) => Promise<{ error?: string }>
+  onSubmit: (values: ProductFormValues, filePath: string | null) => Promise<{ error?: string }>
 }
 
 export default function ProductForm({ product, onSubmit }: ProductFormProps) {
   const router = useRouter()
+  const [filePath, setFilePath] = useState<string | null>(product?.file_path ?? null)
 
   const form = useForm<ProductFormValues>({
     resolver: zodResolver(productSchema) as Resolver<ProductFormValues>,
@@ -55,7 +59,7 @@ export default function ProductForm({ product, onSubmit }: ProductFormProps) {
   }
 
   async function handleSubmit(values: ProductFormValues) {
-    const result = await onSubmit(values)
+    const result = await onSubmit(values, filePath)
     if (result.error) {
       toast.error(result.error)
       return
@@ -210,6 +214,30 @@ export default function ProductForm({ product, onSubmit }: ProductFormProps) {
             </FormItem>
           )}
         />
+
+        {/* Downloadable file */}
+        <div className="space-y-2">
+          <Separator />
+          <div>
+            <p className="text-sm font-medium">Archivo descargable</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              El archivo que recibirán los compradores del producto (PDF, ZIP, PY, EX4/EX5…).
+              El archivo es privado — solo usuarios con una licencia activa pueden descargarlo.
+            </p>
+          </div>
+          {product?.id ? (
+            <FileUpload
+              productId={product.id}
+              currentFilePath={filePath}
+              onUploadComplete={setFilePath}
+              onRemove={() => setFilePath(null)}
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground italic">
+              Primero guarda el producto para poder subir el archivo.
+            </p>
+          )}
+        </div>
 
         <div className="flex gap-3">
           <Button type="submit" disabled={form.formState.isSubmitting}>

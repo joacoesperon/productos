@@ -8,18 +8,21 @@ export default function Footer() {
         <div className="flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <ShieldCheck className="h-4 w-4 text-primary" />
-            LicenseHub
+            DigiStore
           </div>
-          <nav className="flex items-center gap-6 text-sm text-muted-foreground">
+          <nav className="flex flex-wrap items-center justify-center gap-6 text-sm text-muted-foreground">
             <Link href="/products" className="hover:text-foreground transition-colors">
               Products
             </Link>
-            <Link href="/api/v1/licenses/verify" className="hover:text-foreground transition-colors">
-              API Docs
+            <Link href="/terms" className="hover:text-foreground transition-colors">
+              Terms of Service
+            </Link>
+            <Link href="/privacy" className="hover:text-foreground transition-colors">
+              Privacy Policy
             </Link>
           </nav>
           <p className="text-xs text-muted-foreground">
-            © {new Date().getFullYear()} LicenseHub. All rights reserved.
+            © {new Date().getFullYear()} DigiStore. All rights reserved.
           </p>
         </div>
       </div>

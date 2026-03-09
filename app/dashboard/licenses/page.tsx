@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createServiceClient } from '@/lib/supabase/server'
 import LicenseCard from '@/components/licenses/LicenseCard'
 import type { LicenseWithProduct } from '@/types'
 
@@ -6,7 +6,8 @@ export default async function LicensesPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  const { data } = await supabase
+  const serviceClient = createServiceClient()
+  const { data } = await serviceClient
     .from('licenses')
     .select('*, products(id, name, slug, thumbnail_url, type), license_plans(id, name, type, billing_interval)')
     .eq('user_id', user!.id)

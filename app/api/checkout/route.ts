@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
   }
 
-  // 4. Handle free trial — no Stripe needed
+  // 4. Handle free plan — no Stripe needed
   if (plan.price === 0 || plan.type === 'trial') {
     const supabaseAdmin = createAdminClient()
 
@@ -70,7 +70,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Failed to generate license key' }, { status: 500 })
     }
 
-    const expiresAt = plan.trial_days
+    const isTrial = plan.type === 'trial'
+
+    const expiresAt = isTrial && plan.trial_days
       ? addDays(new Date(), plan.trial_days).toISOString()
       : null
 
@@ -96,8 +98,8 @@ export async function POST(request: Request) {
           product_id: productId,
           license_plan_id: planId,
           order_item_id: orderItem.id,
-          status: 'trial' as const,
-          type: 'trial' as const,
+          status: isTrial ? 'trial' as const : 'active' as const,
+          type: plan.type as 'perpetual' | 'subscription' | 'trial',
           max_activations: plan.max_activations,
           expires_at: expiresAt,
         })
@@ -105,12 +107,12 @@ export async function POST(request: Request) {
         await supabaseAdmin.from('license_events').insert({
           license_id: (await supabaseAdmin.from('licenses').select('id').eq('license_key', licenseKey).single()).data?.id ?? '',
           event_type: 'issued' as const,
-          metadata: { plan_type: 'trial', order_id: order.id },
+          metadata: { plan_type: plan.type, order_id: order.id },
         })
       }
     }
 
-    return NextResponse.json({ licenseKey })
+    return NextResponse.json({ licenseKey, planType: plan.type })
   }
 
   // 5. Validate coupon if provided

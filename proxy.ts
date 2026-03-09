@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   })
@@ -42,14 +42,23 @@ export async function middleware(request: NextRequest) {
   }
 
   // Verificar rol admin para rutas /admin
+  // Fetch directo con service role key (funciona en Edge Runtime, bypasea RLS)
   if (user && pathname.startsWith('/admin')) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single()
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-    if (!profile || profile.role !== 'admin') {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}&select=role`,
+      {
+        headers: {
+          apikey: serviceKey!,
+          Authorization: `Bearer ${serviceKey!}`,
+        },
+      }
+    )
+    const rows: { role: string }[] = await res.json()
+
+    if (rows[0]?.role !== 'admin') {
       const url = request.nextUrl.clone()
       url.pathname = '/dashboard'
       return NextResponse.redirect(url)

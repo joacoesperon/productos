@@ -48,8 +48,8 @@ export default function PlanSelector({ plans, productId }: PlanSelectorProps) {
       if (data.url) {
         window.location.href = data.url
       } else if (data.licenseKey) {
-        // Trial activated — no Stripe redirect needed
-        toast.success('Trial activated!')
+        const msg = data.planType === 'trial' ? 'Trial activated!' : 'Product unlocked!'
+        toast.success(msg)
         router.push('/dashboard/licenses')
       }
     } catch {

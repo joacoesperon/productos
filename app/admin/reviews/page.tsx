@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,7 @@ type ReviewWithProduct = Review & {
 }
 
 export default async function AdminReviewsPage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data } = await supabase
     .from('reviews')

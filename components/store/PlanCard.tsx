@@ -22,12 +22,21 @@ export default function PlanCard({ plan, onSelect, isSelected, isPurchasing }: P
   const badge = PLAN_BADGE[plan.type] ?? { label: plan.type, variant: 'outline' as const }
   const features = Array.isArray(plan.features) ? (plan.features as string[]) : []
 
+  const intervalLabel = plan.billing_interval === 'year' ? '/yr' : '/mo'
   const priceLabel =
     plan.price === 0
       ? 'Free'
       : plan.type === 'subscription'
-        ? `${formatCurrency(plan.price)} / ${plan.billing_interval ?? 'month'}`
+        ? `${formatCurrency(plan.price)}${intervalLabel}`
         : formatCurrency(plan.price)
+
+  const buttonLabel = (() => {
+    if (isPurchasing && isSelected) return 'Processing…'
+    if (plan.type === 'trial') return plan.trial_days ? `Start free trial — ${plan.trial_days} days` : 'Start free trial'
+    if (plan.price === 0) return 'Get for free'
+    if (plan.type === 'subscription') return `Subscribe — ${formatCurrency(plan.price)}${intervalLabel}`
+    return `Buy now — ${formatCurrency(plan.price)}`
+  })()
 
   return (
     <Card className={`flex flex-col transition-all ${isSelected ? 'border-primary ring-1 ring-primary' : ''}`}>
@@ -65,11 +74,7 @@ export default function PlanCard({ plan, onSelect, isSelected, isPurchasing }: P
           onClick={() => onSelect(plan.id)}
           disabled={isPurchasing}
         >
-          {isPurchasing && isSelected
-            ? 'Processing…'
-            : plan.price === 0
-              ? 'Start free trial'
-              : 'Select plan'}
+          {buttonLabel}
         </Button>
       </CardFooter>
     </Card>

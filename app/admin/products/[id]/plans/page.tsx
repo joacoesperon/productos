@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { ChevronLeft } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import PlansManager from '@/components/admin/PlansManager'
@@ -14,7 +14,7 @@ export default async function ProductPlansPage({
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data: product } = await supabase
     .from('products')
@@ -87,11 +87,49 @@ export default async function ProductPlansPage({
   async function deletePlan(planId: string): Promise<{ error?: string }> {
     'use server'
     const adminClient = createAdminClient()
-    const { error } = await adminClient
-      .from('license_plans')
-      .delete()
-      .eq('id', planId)
 
+    // 1. Obtener todas las licencias de este plan
+    const { data: licenses } = await adminClient
+      .from('licenses')
+      .select('id')
+      .eq('license_plan_id', planId)
+
+    const licenseIds = (licenses ?? []).map((l) => l.id)
+
+    if (licenseIds.length > 0) {
+      // 2. Borrar activaciones y eventos de esas licencias
+      await adminClient.from('license_activations').delete().in('license_id', licenseIds)
+      await adminClient.from('license_events').delete().in('license_id', licenseIds)
+      // 3. Borrar las licencias
+      await adminClient.from('licenses').delete().in('id', licenseIds)
+    }
+
+    // 4. Obtener order_items de este plan
+    const { data: orderItems } = await adminClient
+      .from('order_items')
+      .select('id, order_id')
+      .eq('license_plan_id', planId)
+
+    if (orderItems && orderItems.length > 0) {
+      const orderIds = [...new Set(orderItems.map((oi) => oi.order_id))]
+
+      // 5. Borrar los order_items
+      await adminClient.from('order_items').delete().eq('license_plan_id', planId)
+
+      // 6. Borrar órdenes que quedaron sin items
+      for (const orderId of orderIds) {
+        const { count } = await adminClient
+          .from('order_items')
+          .select('id', { count: 'exact', head: true })
+          .eq('order_id', orderId)
+        if (!count || count === 0) {
+          await adminClient.from('orders').delete().eq('id', orderId)
+        }
+      }
+    }
+
+    // 7. Borrar el plan
+    const { error } = await adminClient.from('license_plans').delete().eq('id', planId)
     if (error) return { error: error.message }
     return {}
   }

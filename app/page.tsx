@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ArrowRight, BookOpen, Code, Layout, Video, ShieldCheck, Zap, Globe } from 'lucide-react'
@@ -16,7 +16,7 @@ const CATEGORIES_DISPLAY = [
 ] as const
 
 export default async function HomePage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const { data: products } = await supabase
     .from('products')

@@ -1,11 +1,11 @@
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Package, Key, ShoppingCart, Users } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils/formatters'
 
 export default async function AdminPage() {
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   const [
     { count: totalProducts },

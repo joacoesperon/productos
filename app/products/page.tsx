@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/server'
 import ProductCard from '@/components/store/ProductCard'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { Product, LicensePlan, ProductType } from '@/types'
@@ -18,7 +18,7 @@ export default async function ProductsPage({
   searchParams: Promise<SearchParams>
 }) {
   const { type } = await searchParams
-  const supabase = await createClient()
+  const supabase = createServiceClient()
 
   let query = supabase
     .from('products')

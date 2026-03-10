@@ -707,3 +707,196 @@ Products  →  Dashboard (si logueado)  →  Admin (si admin)
 ```
 
 El link sigue el mismo estilo visual que los demás enlaces de la nav (`text-muted-foreground hover:text-foreground transition-colors`). En mobile el nav está oculto (`hidden md:flex`), así que en pantallas pequeñas el acceso sigue siendo por el dropdown del avatar.
+
+---
+
+## Sesión 8 — Sistema de límite de 1 licencia activa por plan por usuario
+
+**Motivación:** No existía ningún mecanismo que impidiera a un usuario comprar el mismo plan varias veces. Cada checkout creaba una nueva licencia independientemente de si el usuario ya tenía una activa. Esto podía resultar en duplicados en la tabla `licenses` y cobros injustificados via Stripe.
+
+**Diseño de la solución:** Se decidió bloquear en tres capas:
+1. **Backend (`checkout/route.ts`)** — primera línea de defensa: si ya existe licencia `active` o `trial` para ese `(user_id, license_plan_id)`, devolver `409 Conflict` sin procesar nada.
+2. **Backend (`webhook-handlers.ts`)** — idempotencia: si Stripe reintenta el webhook `checkout.session.completed` (comportamiento habitual de Stripe ante fallos), no crear una segunda licencia.
+3. **Frontend (product page + PlanSelector + PlanCard)** — UX: mostrar visualmente qué planes ya posee el usuario, deshabilitar la compra y redirigir a `/dashboard/licenses`.
+
+Se eligió verificar solo los estados `active` y `trial` (no `expired`, `revoked`, `suspended`), de modo que un usuario cuya licencia caducó SÍ puede volver a comprar o suscribirse.
+
+---
+
+### Capa 1 — `app/api/checkout/route.ts`
+
+Se añadió un bloque de verificación tras obtener el plan (nuevo paso 4), antes de cualquier procesamiento de pago:
+
+```typescript
+// 4. Verificar que el usuario no tenga ya una licencia activa para este plan
+const supabaseAdmin = createAdminClient()
+const { data: existingLicense } = await supabaseAdmin
+  .from('licenses')
+  .select('id')
+  .eq('user_id', user.id)
+  .eq('license_plan_id', planId)
+  .in('status', ['active', 'trial'])
+  .maybeSingle()
+
+if (existingLicense) {
+  return NextResponse.json(
+    { error: 'You already have an active license for this plan' },
+    { status: 409 }
+  )
+}
+```
+
+`supabaseAdmin` (ya instanciado aquí) se reutiliza en el bloque de planes gratuitos/trial que viene después, eliminando la instanciación duplicada que existía dentro de ese bloque. Los pasos de comentario se renumeraron (4→5 para free plan, 5→6 para coupon, 6→7 para Stripe session).
+
+---
+
+### Capa 2 — `lib/stripe/webhook-handlers.ts`
+
+En `handleCheckoutSessionCompleted`, se añadió una verificación de idempotencia inmediatamente después de obtener el plan y antes de crear la orden:
+
+```typescript
+const { data: existingLicense } = await supabase
+  .from('licenses')
+  .select('id')
+  .eq('user_id', meta.user_id)
+  .eq('license_plan_id', meta.license_plan_id)
+  .in('status', ['active', 'trial'])
+  .maybeSingle()
+
+if (existingLicense) {
+  console.log('[webhook] License already exists for this plan, skipping duplicate creation')
+  return
+}
+```
+
+Esto protege contra el escenario en que Stripe reintente el evento (hasta 3 días con backoff exponencial).
+
+---
+
+### Capa 3 — UI en la página de producto
+
+**`app/products/[slug]/page.tsx`:**
+- Se añadió `createClient` al import de `@/lib/supabase/server`.
+- Se obtiene la sesión del usuario con `authClient.auth.getUser()`.
+- Si hay usuario logueado, se consultan sus licencias `active`/`trial` para el producto actual, extrayendo los `license_plan_id`:
+
+```typescript
+let ownedPlanIds: string[] = []
+if (user) {
+  const { data: licenses } = await supabase
+    .from('licenses')
+    .select('license_plan_id')
+    .eq('user_id', user.id)
+    .eq('product_id', p.id)
+    .in('status', ['active', 'trial'])
+  ownedPlanIds = licenses?.map((l) => l.license_plan_id) ?? []
+}
+```
+- Se pasa `ownedPlanIds` a `<PlanSelector>`.
+
+**`components/store/PlanSelector.tsx`:**
+- Nueva prop `ownedPlanIds?: string[]` (default `[]`).
+- Nueva función `handleSelect(planId)` que ignora la selección si el plan está en `ownedPlanIds` — previene que se haga click y se intente comprar un plan ya poseído.
+- En el map de `PlanCard` se pasa `isOwned={ownedPlanIds.includes(plan.id)}`.
+- El botón "Continue" solo se muestra si el plan seleccionado NO está en `ownedPlanIds`.
+- Se añadió manejo explícito del status `409`: muestra toast de error y redirige a `/dashboard/licenses` en lugar de mostrar un error genérico.
+
+**`components/store/PlanCard.tsx`:**
+- Nueva prop `isOwned?: boolean`.
+- Import de `Link` de next/link.
+- Cuando `isOwned = true`, la tarjeta muestra:
+  - Borde verde (`border-green-500 ring-1 ring-green-500`)
+  - Badge "Active" en verde en lugar del badge de tipo de plan
+  - Botón "Manage license →" (variante `secondary`) como `<Link href="/dashboard/licenses">` en lugar del botón de compra
+- Cuando `isOwned = false`, el comportamiento es idéntico al anterior.
+
+---
+
+## Sesión 9 — Ocultar "Create account" en homepage si hay sesión activa
+
+**Problema:** El hero de la homepage (`app/page.tsx`) mostraba siempre dos botones: "Browse products" y "Create account". Un usuario ya logueado seguía viendo el botón de registro, lo cual no tiene sentido y puede resultar confuso.
+
+**Causa:** La homepage usaba únicamente `createServiceClient()` para obtener los productos publicados, pero no obtenía la sesión del usuario, por lo que no tenía manera de saber si había alguien logueado.
+
+**Fix en `app/page.tsx`:**
+- Se añadió `createClient` al import de `@/lib/supabase/server`.
+- Se obtiene la sesión al inicio de la función con `authClient.auth.getUser()`.
+- El botón "Create account" se envuelve en `{!user && (...)}`, por lo que solo aparece cuando no hay sesión activa.
+- El botón "Browse products" permanece siempre visible para todos los usuarios.
+
+```tsx
+{!user && (
+  <Button size="lg" variant="outline" asChild>
+    <Link href="/auth/register">Create account</Link>
+  </Button>
+)}
+```
+
+Un usuario logueado que visite la homepage solo verá el botón "Browse products" en el hero, y puede navegar al dashboard desde el link en la barra de navegación.
+
+---
+
+## Sesión 10 — Cambio de contraseña desde el perfil
+
+### Diseño previo a la implementación
+
+Antes de escribir código se razonó el diseño con especial atención al caso de usuarios de Google OAuth.
+
+**El problema con Google OAuth:** Supabase Auth soporta múltiples proveedores de identidad. Un usuario registrado con Google **no tiene contraseña asignada** — su identity es exclusivamente `google`. Mostrarle un formulario de "cambiar contraseña" no solo es inútil sino confuso.
+
+**Cómo detectarlo:** Supabase expone `user.identities[]` en el objeto del usuario. Cada entry tiene un campo `provider`. Si existe al menos una entry con `provider === 'email'`, el usuario tiene email/password. Si todas las identidades son de otro proveedor (p.ej. `google`), no tiene contraseña.
+
+```typescript
+const hasEmailIdentity = user.identities?.some(i => i.provider === 'email') ?? false
+```
+
+**Opciones evaluadas:**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Ocultar sección para usuarios Google | Mostrar aviso explicativo | ✅ Elegida |
+| B — Permitir a usuarios Google establecer contraseña | `updateUser({ password })` funciona incluso para OAuth users | ❌ Demasiado complejo sin caso de uso real |
+| C — Mostrar formulario deshabilitado | Confuso | ❌ Descartada |
+
+**Se eligió la Opción A** por ser la más simple y honesta. Los usuarios de Google ven un aviso: *"Your account uses Google Sign-In. Password management is handled by Google."*
+
+**Flujo de seguridad para el cambio de contraseña:**
+
+Se decidió exigir la contraseña actual antes de permitir el cambio. El motivo: si se omitiera, cualquiera con acceso a una sesión abierta en un dispositivo ajeno podría cambiar la contraseña. El flujo implementado:
+
+1. Formulario: contraseña actual + nueva contraseña + confirmación
+2. Verificar contraseña actual vía `signInWithPassword({ email, password: currentPassword })` — si falla, mostrar error en el campo
+3. Si pasa la verificación, llamar `updateUser({ password: newPassword })`
+4. Toast de éxito, limpiar formulario
+
+---
+
+### Implementación
+
+**`lib/utils/validators.ts`** — nuevo schema `changePasswordSchema`:
+```typescript
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+  confirmPassword: z.string(),
+}).refine(data => data.newPassword === data.confirmPassword, {
+  message: 'Passwords do not match',
+  path: ['confirmPassword'],
+})
+export type ChangePasswordFormValues = z.infer<typeof changePasswordSchema>
+```
+
+**`app/dashboard/profile/page.tsx`** — reescrito con las siguientes adiciones:
+
+- Estado `hasEmailIdentity: boolean` inicialmente `false`, se establece en el `useEffect` de carga:
+  ```typescript
+  setHasEmailIdentity(user.identities?.some(i => i.provider === 'email') ?? false)
+  ```
+
+- Segundo `useForm` con `changePasswordSchema` para el formulario de contraseña, con sus propios `register`, `handleSubmit`, `setError` y `formState`.
+
+- `onChangePassword()`: verifica primero via `signInWithPassword`, luego llama `updateUser`. Si `signInWithPassword` falla, setea el error directamente en el campo `currentPassword` via `setError`.
+
+- Al final del JSX, condicional según `hasEmailIdentity`:
+  - `true` → Card "Change Password" con formulario de 3 campos
+  - `false` → Card "Password" con icono de Chrome y mensaje explicativo

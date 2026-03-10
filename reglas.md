@@ -1,0 +1,4 @@
+cada vez que hagas cambios en los ficheros tienes que registrarlos en el fichero memoria.md explicandose los cambios efectuados, la razon, como se habia planteando en un principio y porque lo modificamos, en memoria debe quedar plasmado todo el proceso de desarrollo del proyecto actual, cosa de que cuando terminemos podamos recurrir a ese documento para ver como fue todo el proceso completo de diseño, implementacion,cambios, explicaciones,etc, basicamente es la memoria del trabajo donde se documenta todo el proceso, puedes leer contexto.md para entender de que va el proyecto cuando lo necesites para explicar cosas en memoria.md.
+
+debes ir manteniendo el fichero todo.md actualizado segun vamos implementando funcionalidades, este fichero lo usaremos para llevar un registro de las atareas que se llevaron a cabo y que se planean llevar a cabo.
+

@@ -399,3 +399,311 @@ Next.js 16 deprecó el nombre `middleware` en favor de `proxy`. Migrado con el c
 **`supabase/migration.sql`** (append): `ALTER TABLE products ADD COLUMN IF NOT EXISTS file_path TEXT`. El bucket `product-files` hay que crearlo manualmente en Supabase Dashboard → Storage (privado, sin acceso público).
 
 **`README.md`**: reescrito completamente. Describe DigiStore como tienda de productos digitales. Incluye ejemplos de integración en Python y MQL5 para verificación de licencias.
+
+---
+
+## Sesión 4 — Debug admin + RLS fix + mejoras UX + eliminar productos y planes
+
+Esta sesión fue principalmente de corrección de errores críticos que impedían el funcionamiento del panel de administración y la tienda pública. Se descubrió un bug sistémico en RLS (Row Level Security) de Supabase que afectaba a prácticamente toda la aplicación.
+
+---
+
+### 1. Bug: admin redirige a /dashboard en vez de mostrar el panel
+
+**Síntoma:** Al acceder a `http://localhost:3000/admin` con una cuenta admin (autenticada con Google OAuth), la aplicación redirigía automáticamente a `/dashboard`.
+
+**Diagnóstico:** Se añadieron `console.log` en `proxy.ts` y se observó que el fetch de perfil devolvía correctamente `[{"role":"admin"}]` pero el 307 redirect seguía ocurriendo. Esto llevó a descubrir que **había dos puntos de verificación de rol**: uno en `proxy.ts` y otro en `app/admin/layout.tsx`.
+
+**Causa raíz en `proxy.ts`:** La función `createClient` de `@supabase/ssr` tiene incompatibilidades en el Edge Runtime de Next.js cuando la sesión fue creada vía Google OAuth. La query a `profiles` devolvía null silenciosamente, causando la redirección.
+
+**Fix en `proxy.ts`:** Se reemplazó la llamada a Supabase por un `fetch` nativo directo a la REST API de Supabase usando la service role key:
+
+```typescript
+const res = await fetch(
+  `${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}&select=role`,
+  { headers: { apikey: serviceKey!, Authorization: `Bearer ${serviceKey!}` } }
+)
+const rows: { role: string }[] = await res.json()
+if (rows[0]?.role !== 'admin') { /* redirect */ }
+```
+
+Este approach funciona en Edge Runtime sin depender del cliente Supabase y bypasea las limitaciones de SSR con OAuth.
+
+**Fix en `app/admin/layout.tsx`:** Tenía la misma lógica de verificación de rol pero usando `createClient()` (anon key). Se migró a `createServiceClient()` (ver punto 2).
+
+---
+
+### 2. Nuevo: `createServiceClient()` en `lib/supabase/server.ts`
+
+Se añadió una función `createServiceClient()` que crea un cliente Supabase con la `SUPABASE_SERVICE_ROLE_KEY`. A diferencia del cliente normal que usa la anon key + cookies del usuario, este cliente bypasa completamente RLS.
+
+**Cuándo usarlo:**
+- En páginas/acciones admin donde se necesitan datos de todos los usuarios
+- En páginas públicas que consultan productos/planes (para evitar los problemas de RLS descritos abajo)
+- Nunca se exporta al cliente browser — solo en Server Components y API routes
+
+```typescript
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+
+export function createServiceClient() {
+  return createSupabaseClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
+```
+
+---
+
+### 3. Bug crítico: RLS infinite recursion (error 42P17)
+
+**Síntoma:** Todas las páginas del admin mostraban datos vacíos aunque había registros en la base de datos. El error en logs era `42P17: infinite recursion detected in policy for relation "profiles"`.
+
+**Causa raíz:** La política RLS `"Admin reads all profiles"` en la tabla `profiles` tenía esta lógica:
+```sql
+EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin')
+```
+Esta política se evaluaba recursivamente: al consultar `profiles` para verificar si el usuario es admin, PostgreSQL evaluaba de nuevo la misma política, que volvía a consultar `profiles`, eternamente.
+
+El problema se amplificaba porque **todas las políticas de admin** en otras tablas usaban la misma sub-query a `profiles`. Al estar logueado como admin y hacer cualquier query, PostgreSQL evaluaba las políticas aplicables usando OR, disparando la recursión.
+
+**Solución completa:**
+1. Eliminar la política problemática: `DROP POLICY IF EXISTS "Admin reads all profiles" ON profiles`
+2. Migrar todas las páginas admin (10 archivos) de `createClient()` a `createServiceClient()`
+3. Migrar las páginas públicas también (ver punto 4)
+
+**Archivos migrados a `createServiceClient()`:**
+- `app/admin/page.tsx`
+- `app/admin/products/page.tsx`
+- `app/admin/products/[id]/plans/page.tsx`
+- `app/admin/products/[id]/edit/page.tsx`
+- `app/admin/orders/page.tsx`
+- `app/admin/reviews/page.tsx`
+- `app/admin/customers/page.tsx`
+- `app/admin/licenses/page.tsx`
+- `app/admin/licenses/[id]/page.tsx`
+- `app/admin/coupons/page.tsx`
+
+---
+
+### 4. Bug: productos no aparecían en `/products`
+
+**Síntoma:** La página pública `/products` mostraba "no products found" aunque había productos publicados confirmados en la DB.
+
+**Causa:** El mismo problema de recursión RLS. Cuando un admin (sesión autenticada) visitaba la página pública, las políticas admin de la tabla `products` se evaluaban e intentaban consultar `profiles` → recursión → query fallaba silenciosamente → array vacío.
+
+**Fix:** `app/page.tsx`, `app/products/page.tsx` y `app/products/[slug]/page.tsx` migrados a `createServiceClient()`. Al usar la service role key, RLS se bypasa completamente y los productos publicados siempre son visibles.
+
+---
+
+### 5. Bug: upload de archivos fallaba con "Bucket not found" y luego "42P17"
+
+**Primera fase — Bucket not found:** El bucket `product-files` no existía en Supabase Storage. El usuario lo creó manualmente desde el Dashboard de Supabase (bucket privado, sin acceso público).
+
+**Segunda fase — error 42P17:** Una vez creado el bucket, el upload fallaba con el mismo error de recursión RLS. Las políticas de Storage también consultaban `profiles` para verificar el rol admin.
+
+**Fix:** En lugar de intentar arreglar las políticas de Storage, se creó una API route server-side que usa la service role key para hacer el upload, evitando RLS completamente.
+
+**`app/api/admin/upload/route.ts`** (nuevo):
+- `POST /api/admin/upload` — recibe `FormData` con `file`, `productId` y opcionalmente `currentFilePath`. Elimina el archivo anterior si existe, sube el nuevo, devuelve `{ path }`.
+- `DELETE /api/admin/upload` — recibe `{ filePath }` en JSON, elimina el archivo del bucket.
+- Ambos endpoints verifican que el usuario es admin antes de proceder con `requireAdmin()`.
+
+**`components/admin/FileUpload.tsx`** actualizado: en lugar de llamar directamente a `supabase.storage`, ahora hace `fetch('/api/admin/upload', { method: 'POST', body: formData })`. Esto desacopla completamente el upload del cliente browser y las restricciones de RLS.
+
+---
+
+### 6. Mejoras UX — comportamiento adaptativo por tipo de plan y producto
+
+**Motivación:** Al probar el flujo de compra se detectaron inconsistencias entre lo que mostraba la UI y lo que realmente se estaba generando en la base de datos.
+
+#### 6a. Texto del botón en `PlanCard.tsx`
+**Problema anterior:** El botón siempre decía "Start free trial" independientemente del tipo de plan.
+
+**Solución:** Texto adaptativo según tipo y precio:
+```typescript
+if (plan.type === 'trial')       → "Start free trial — X days"
+if (plan.price === 0)            → "Get for free"
+if (plan.type === 'subscription') → "Subscribe — $X.XX/mo" o "/yr"
+default                          → "Buy now — $X.XX"
+```
+
+También se añadió `intervalLabel` (`/mo` vs `/yr`) según `billing_interval`.
+
+#### 6b. Bug: licencias perpetuas gratuitas con status 'trial'
+**Problema:** Un plan de tipo `perpetual` con `price = 0` generaba la licencia con `status: 'trial'` en la DB.
+
+**Causa:** En `app/api/checkout/route.ts`, la condición para path directo era `plan.price === 0 || plan.type === 'trial'`, pero en ambos casos se asignaba `status: 'trial'`.
+
+**Fix:**
+```typescript
+const isTrial = plan.type === 'trial'
+// En licenses.insert:
+status: isTrial ? 'trial' : 'active',
+type: plan.type as 'perpetual' | 'subscription' | 'trial',
+```
+La ruta también devuelve `{ licenseKey, planType }` para que el cliente pueda mostrar el toast correcto ("Trial activated!" vs "Product unlocked!").
+
+#### 6c. Dashboard de licencias adaptativo por tipo de producto
+
+**`app/dashboard/licenses/[id]/page.tsx`** reescrito para adaptar la UI según `product.type`:
+
+| Tipo de producto | UI mostrada |
+|---|---|
+| `software` | Clave de licencia + conteo de activaciones + lista de dispositivos activos |
+| `ebook` / `template` | Solo botón de descarga del archivo |
+| `course` | Botón "Go to course" (link a `/dashboard/courses/[productId]`) |
+
+**`components/licenses/LicenseCard.tsx`** actualizado: el hint debajo del nombre del plan es adaptativo:
+- `software` → "X / Y activations"
+- `ebook` / `template` → "download available"
+- `course` → "course access"
+
+**`app/dashboard/licenses/page.tsx`** migrado a `createServiceClient()` para la query de licencias (mantiene `createClient()` solo para `getUser()`).
+
+---
+
+### 7. Eliminar plan de licencia con cascade
+
+**Problema:** Al intentar eliminar un plan desde `app/admin/products/[id]/plans/page.tsx`, PostgreSQL lanzaba:
+```
+update or delete on table "license_plans" violates foreign key constraint
+```
+Esto ocurre porque `order_items.license_plan_id` referencia `license_plans.id` con `ON DELETE RESTRICT` implícito.
+
+**Solución:** Cascade manual en la función `deletePlan()` en el servidor:
+1. Obtener todas las licencias del plan → eliminar sus `license_activations` y `license_events`
+2. Eliminar las `licenses`
+3. Obtener los `order_items` del plan → eliminarlos → eliminar órdenes que quedaron sin items
+4. Eliminar el plan
+
+---
+
+### 8. Eliminar producto con cascade + botón de confirmación
+
+**Motivación:** No había forma de eliminar un producto desde la UI. Si un admin quería borrar un producto, tenía que hacerlo directamente con SQL.
+
+**`components/admin/DeleteProductButton.tsx`** (nuevo): Client Component con `AlertDialog` de shadcn para confirmar antes de eliminar. Muestra el nombre del producto en el mensaje de confirmación. Al confirmar llama al server action `onDelete()` y si tiene éxito redirige a `/admin/products`.
+
+> **Nota:** Este fue el motivo por el que se instaló el componente `alert-dialog` de shadcn.
+
+**`app/admin/products/[id]/edit/page.tsx`** actualizado:
+- Server action `deleteProduct()` con cascade completo: `license_activations` → `license_events` → `licenses` → `order_items` → órdenes huérfanas → `license_plans` → archivo en Storage → producto.
+- Se añadió una sección "Zona de peligro" al final del formulario de edición con fondo rojo tenue, visible solo al editar (no en `/new`).
+
+---
+
+## Sesión 5 — Recuperación de contraseña + descarga de archivos desde admin
+
+---
+
+### 1. Instalación de `alert-dialog` de shadcn
+
+**Motivo:** `components/admin/DeleteProductButton.tsx` importaba `@/components/ui/alert-dialog` pero el componente no estaba instalado, causando un error de build.
+
+**Fix:**
+```bash
+npx shadcn@latest add alert-dialog --yes
+```
+Creó `components/ui/alert-dialog.tsx`.
+
+---
+
+### 2. Descarga de archivos desde el admin (botón Download en FileUpload)
+
+**Problema:** El admin podía subir, reemplazar y eliminar archivos adjuntos a productos, pero no había forma de descargarlos. La única opción era ir al dashboard de usuario, tener una licencia activa y descargar desde ahí — claramente incómodo para el administrador.
+
+**Solución:**
+
+**`app/api/admin/upload/route.ts`** — nuevo handler `GET`:
+```typescript
+GET /api/admin/upload?filePath=...
+```
+Genera una URL firmada de Supabase Storage válida por 60 segundos y la devuelve como `{ url }`. Requiere autenticación como admin.
+
+**`components/admin/FileUpload.tsx`** — añadido botón "Download":
+- Estado `downloading` para deshabilitar el botón mientras se obtiene la URL
+- `handleDownload()`: hace GET al endpoint, recibe la URL firmada, crea un `<a>` temporal con `download` attribute y lo clickea programáticamente
+- El orden de botones es: **Download → Replace → Remove**
+
+---
+
+### 3. Flujo completo de recuperación de contraseña
+
+**Motivación:** Solo existía login con email/contraseña y Google OAuth. No había mecanismo para que un usuario que olvidó su contraseña pudiera recuperarla. Era una funcionalidad básica que faltaba desde el inicio.
+
+**Cómo funciona con Supabase:**
+1. `supabase.auth.resetPasswordForEmail(email, { redirectTo })` envía un email con un link
+2. El link apunta a `/auth/callback?code=TOKEN&next=/auth/reset-password`
+3. El callback intercambia el code por sesión y redirige al path indicado por `next`
+4. En `/auth/reset-password`, el usuario (ya autenticado) llama `supabase.auth.updateUser({ password })`
+
+**`lib/utils/validators.ts`** — se añadieron dos schemas:
+```typescript
+forgotPasswordSchema  → { email: string }
+resetPasswordSchema   → { password, confirmPassword } con refinement de igualdad
+```
+Y sus tipos exportados: `ForgotPasswordFormValues`, `ResetPasswordFormValues`.
+
+**`app/auth/forgot-password/page.tsx`** (nuevo): Client Component con formulario de email. Tras enviar muestra un estado de confirmación con el email al que se envió el link. Usa `window.location.origin` como fallback si `NEXT_PUBLIC_SITE_URL` no está definida (útil en localhost).
+
+**`app/auth/reset-password/page.tsx`** (nuevo): Client Component con formulario de nueva contraseña + confirmación. Llama `supabase.auth.updateUser({ password })`. En caso de éxito redirige a `/dashboard`. El middleware no bloquea esta ruta porque solo protege `/dashboard/**` y `/admin/**`.
+
+**`app/auth/callback/route.ts`** — corregido bug de prioridad de redirección:
+
+**Problema original:**
+```typescript
+const next = searchParams.get('next') ?? '/'
+const redirectTo = searchParams.get('redirectTo') ?? '/dashboard'
+// redirectTo nunca era null → siempre redirigía a /dashboard
+new URL(redirectTo ?? next, request.url)
+```
+
+**Fix:**
+```typescript
+const destination =
+  searchParams.get('next') ?? searchParams.get('redirectTo') ?? '/dashboard'
+```
+Ahora `next` tiene prioridad, lo que permite que el link de reset de contraseña lleve correctamente a `/auth/reset-password` en lugar de `/dashboard`.
+
+**`app/auth/login/page.tsx`** — añadido link "Forgot password?" inline junto a la label del campo de contraseña, apuntando a `/auth/forgot-password`.
+
+---
+
+## Sesión 6 — Preservar nombre original del archivo al subir
+
+**Problema:** Al subir un archivo desde el admin, el nombre original se modificaba de dos formas:
+1. Los espacios se reemplazaban por guiones bajos (`replace(/\s+/g, '_')`)
+2. Se añadía un prefijo de timestamp (`Date.now()_`) delante del nombre
+
+Esto hacía que el archivo quedara guardado y descargado con un nombre diferente al original, lo que resulta confuso tanto para el admin como para el usuario final que descarga el producto.
+
+**Causa del diseño original:** El prefijo de timestamp se añadió para evitar colisiones de nombre si se subían dos archivos distintos al mismo producto. Sin embargo, dado que el upload siempre elimina el archivo anterior antes de subir el nuevo (`remove([currentFilePath])`) y usa `upsert: true`, no puede haber colisiones dentro del mismo producto. Entre distintos productos tampoco hay colisión porque la ruta incluye el `productId` como carpeta (`productId/filename`).
+
+**Fix en `app/api/admin/upload/route.ts`:**
+```typescript
+// Antes:
+const safeName = file.name.replace(/\s+/g, '_')
+const path = `${productId}/${Date.now()}_${safeName}`
+
+// Después:
+const path = `${productId}/${file.name}`
+```
+
+El nombre del archivo ahora se preserva exactamente como se llama en el sistema del administrador.
+
+---
+
+## Sesión 7 — Link a Dashboard en el header
+
+**Problema:** Un usuario logueado solo podía acceder a `/dashboard` abriendo el dropdown del avatar en el header. No había ningún link directo visible en la barra de navegación principal, lo que hacía la navegación menos intuitiva.
+
+**Contexto:** El `<nav>` del header ya mostraba "Products" siempre y "Admin" condicionalmente para admins, pero no había un equivalente para usuarios normales logueados.
+
+**Fix en `components/layout/Header.tsx`:** Se añadió el link "Dashboard" en el `<nav>` principal, visible únicamente cuando hay sesión activa (`user !== null`). El orden resultante de la nav es:
+
+```
+Products  →  Dashboard (si logueado)  →  Admin (si admin)
+```
+
+El link sigue el mismo estilo visual que los demás enlaces de la nav (`text-muted-foreground hover:text-foreground transition-colors`). En mobile el nav está oculto (`hidden md:flex`), así que en pantallas pequeñas el acceso sigue siendo por el dropdown del avatar.

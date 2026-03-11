@@ -900,3 +900,109 @@ export type ChangePasswordFormValues = z.infer<typeof changePasswordSchema>
 - Al final del JSX, condicional según `hasEmailIdentity`:
   - `true` → Card "Change Password" con formulario de 3 campos
   - `false` → Card "Password" con icono de Chrome y mensaje explicativo
+
+---
+
+## Sesión 11 — Admin: gestión avanzada de licencias
+
+### Contexto y diseño previo
+
+Antes de implementar se realizó una discusión de diseño sobre qué cambios hacer al panel de licencias del admin. El estado previo era:
+
+- **Lista** (`/admin/licenses`): columnas license key, product, status, activations, expires, issued. Búsqueda solo por license key.
+- **Detalle** (`/admin/licenses/[id]`): funciones de revocar y suspender ya implementadas, historial de eventos, lista de dispositivos activos. Sin información del usuario propietario.
+
+Las preguntas planteadas fueron:
+1. ¿Debe el admin ver quién posee cada licencia? → **Sí, imprescindible**.
+2. ¿Debe poder revocar/eliminar? → **Revocar y suspender ya existían. Eliminar deliberadamente no se implementa** — borraría histórico de auditoría y es demasiado destructivo para uso normal.
+3. ¿Tiene sentido la columna "Activations" para todos los tipos? → **No**. Para ebooks/templates/courses siempre es `0/1` y no aporta información. Solo tiene sentido para `software`.
+4. ¿Cómo se aplica el patrón adaptativo por tipo al admin? → Igual que en el dashboard de usuario: el admin ve "Active Devices" solo si el producto es de tipo `software`.
+
+**Problema técnico de JOIN**: `licenses.user_id` referencia `auth.users`, no `profiles` directamente. PostgREST no infiere ese join indirecto. Solución: dos queries separadas — primero licencias, luego profiles para los `user_id` resultantes.
+
+### Cambios implementados
+
+**`app/admin/licenses/page.tsx`**
+
+- Query: se mantiene la query de licencias; se añade una segunda query a `profiles` con los `user_id` únicos del resultado, construyendo un `profileMap: Record<string, Profile>` para lookup en O(1).
+- Búsqueda dual: si el término contiene `@` se interpreta como email → busca matching `profiles` primero, extrae sus IDs, filtra licencias por `user_id IN (ids)`. Si no, busca por `license_key` como antes. Si ningún perfil coincide con el email, devuelve lista vacía inmediatamente sin hacer la query de licencias.
+- Columna "Activations" **eliminada** de la lista → sustituida por columna **"User"** con email del propietario.
+- Placeholder del search actualizado: `"Search by license key or user email…"`
+- Refactorizado con función `renderPage()` para evitar duplicar JSX en el early-return del caso email-sin-resultados.
+
+**`app/admin/licenses/[id]/page.tsx`**
+
+- Query actualizada para incluir `products.type` (antes solo era `id, name, slug`).
+- Segunda query `profiles.select('id, email, full_name').eq('id', license.user_id)` para obtener datos del propietario.
+- Nueva sección **"Owner"** (Card) antes de "Details": muestra nombre completo (si existe), email, y user_id en mono text.
+- Sección **"Active Devices"** condicional: `{isSoftware && (<div>...)</div>)}` — solo se renderiza si `license.products.type === 'software'`.
+- Igualmente en la card "Details", la fila de "Activations" solo aparece si `isSoftware`.
+- Tipo `LicenseFull` actualizado: `products: Pick<Product, 'id' | 'name' | 'slug' | 'type'>` (añadido `type`).
+
+---
+
+## Sesión 12 — Cancelación de suscripciones por el usuario
+
+### Contexto
+
+Los usuarios con suscripciones activas no tenían ninguna forma de cancelarlas desde DigiStore. El mecanismo correcto de Stripe es `cancel_at_period_end: true` — el acceso se mantiene hasta el fin del período facturado y luego Stripe dispara `customer.subscription.deleted`, que nuestro handler existente ya convertía en `status = expired`.
+
+El campo `cancel_at_period_end` no existía en la tabla `licenses` — fue necesario añadirlo.
+
+### Diseño
+
+- `cancel_at_period_end: true` → suscripción programada para cancelar al final del período; el usuario mantiene acceso
+- `cancel_at_period_end: false` → suscripción activa y renovándose normalmente
+- Posibilidad de "deshacer" la cancelación antes de que venza el período con un botón "Keep subscription"
+- El webhook `customer.subscription.updated` actúa como safety net para sincronizar el estado si el usuario cancela desde fuera de DigiStore (p.ej. Stripe Dashboard)
+
+### Archivos modificados / creados
+
+**`supabase/migration.sql`** — append:
+```sql
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS cancel_at_period_end boolean NOT NULL DEFAULT false;
+```
+
+**`types/database.ts`** — `licenses`:
+- Row: `cancel_at_period_end: boolean`
+- Insert: `cancel_at_period_end?: boolean`
+- Update: `cancel_at_period_end?: boolean`
+
+**`app/api/subscriptions/cancel/route.ts`** (nuevo):
+```
+POST /api/subscriptions/cancel
+Body: { licenseId: string, action: 'cancel' | 'reactivate' }
+```
+1. Verifica sesión del usuario
+2. Obtiene licencia filtrando por `id` **y** `user_id` (previene IDOR)
+3. Valida: `type === 'subscription'`, `status === 'active'`, `stripe_subscription_id` presente
+4. Llama `stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: action === 'cancel' })`
+5. Actualiza DB: `licenses.update({ cancel_at_period_end })`
+
+**`lib/stripe/webhook-handlers.ts`** — nuevo handler `handleSubscriptionUpdated`:
+```typescript
+export async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
+  // busca licencia por stripe_subscription_id
+  // actualiza cancel_at_period_end desde subscription.cancel_at_period_end
+}
+```
+
+**`app/api/webhooks/stripe/route.ts`** — nuevo case:
+```typescript
+case 'customer.subscription.updated':
+  await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
+  break
+```
+
+**`components/licenses/CancelSubscriptionButton.tsx`** (nuevo, Client Component):
+- Props: `licenseId`, `cancelAtPeriodEnd`, `expiresAt`
+- Si `cancelAtPeriodEnd === false`: botón "Cancel subscription" → abre `AlertDialog` con mensaje explicativo → al confirmar llama la API con `action: 'cancel'` → `router.refresh()`
+- Si `cancelAtPeriodEnd === true`: botón "Keep subscription" → llama API con `action: 'reactivate'` → `router.refresh()`
+
+**`app/dashboard/licenses/[id]/page.tsx`** — cambios:
+- Import de `CancelSubscriptionButton` y `AlertCircle`
+- `isSubscription = license.type === 'subscription'`
+- Cast de tipo actualizado para incluir `cancel_at_period_end: boolean`
+- `expiresLabel = isSubscription && isActive && !cancel_at_period_end ? 'Renews' : 'Expires'` — refleja si la suscripción va a renovarse o terminar
+- Banner naranja `AlertCircle` si `isSubscription && cancel_at_period_end && expires_at`
+- `<CancelSubscriptionButton>` renderizado si `isSubscription && isActive`

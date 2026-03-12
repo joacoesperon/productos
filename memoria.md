@@ -1006,3 +1006,127 @@ case 'customer.subscription.updated':
 - `expiresLabel = isSubscription && isActive && !cancel_at_period_end ? 'Renews' : 'Expires'` — refleja si la suscripción va a renovarse o terminar
 - Banner naranja `AlertCircle` si `isSubscription && cancel_at_period_end && expires_at`
 - `<CancelSubscriptionButton>` renderizado si `isSubscription && isActive`
+
+---
+
+## Sesión 13 — Fix botón "Cancel subscription" en planes gratuitos
+
+### Problema
+
+El botón "Cancel subscription" aparecía en el detail page de cualquier licencia de tipo `subscription` activa, incluyendo planes con `price = 0` que **no pasan por Stripe**. Para estos planes:
+- `stripe_subscription_id` es `null` (checkout los procesa directamente sin Stripe)
+- `expires_at` es `null` (no hay ciclo de facturación)
+- Si el usuario pulsaba "Cancel subscription", la API route devolvía 400: `"No Stripe subscription found for this license"`
+
+También se aclaró en esta sesión que para suscripciones gratuitas (price=0) **no hay fecha de renovación que mostrar** — es el comportamiento correcto, ya que no existe Stripe que gestione el ciclo.
+
+### Fix
+
+**`app/dashboard/licenses/[id]/page.tsx`** — condición del `<CancelSubscriptionButton>`:
+
+```tsx
+// Antes:
+{isSubscription && isActive && (
+
+// Después:
+{isSubscription && isActive && license.stripe_subscription_id && (
+```
+
+El botón solo aparece si la licencia tiene un `stripe_subscription_id` asociado, lo que garantiza que la API de cancelación puede operar correctamente.
+
+### Cómo probar suscripciones pagas con Stripe (test mode)
+
+Para que la fecha de renovación aparezca, el plan debe tener `price > 0` y `type = 'subscription'`. Con una tarjeta de prueba `4242 4242 4242 4242` Stripe procesa el pago, crea una suscripción real (en test mode) y dispara los webhooks necesarios para que `expires_at` se establezca y se muestre en el dashboard.
+
+Para recibir webhooks en localhost se necesita la Stripe CLI:
+```bash
+stripe listen --forward-to localhost:3000/api/webhooks/stripe
+# copia el "whsec_..." que muestra y ponlo en STRIPE_WEBHOOK_SECRET en .env.local
+```
+
+---
+
+## Sesión 14 — Fix precio en vista admin + Fix LicenseCard Expires/Renews
+
+### ⚠️ ADVERTENCIA PERMANENTE: Nunca confundas centavos con dólares
+
+**Este bug costó $0 porque estábamos en desarrollo. En producción, un error así puede cobrarle $0.30 a alguien que debería pagar $30 (pérdida directa de ingresos), o peor: cobrarle $3000 a alguien que debería pagar $30 (contracargos, disputas, reputación destruida).** Los bugs de plata no se parecen a ningún otro tipo de bug — no hay stack trace, no hay excepción, no hay test que falle en rojo. Simplemente el número es incorrecto y nadie lo nota hasta que alguien revisa su tarjeta.
+
+**Regla de oro para este proyecto:** `license_plans.price` y `orders.total_amount` se almacenan siempre en **centavos** (entero). `formatCurrency(value)` ya divide por 100 internamente — nunca pasarle `value / 100`. El checkout de Stripe espera `unit_amount` en centavos — nunca pasarle dólares. Cada vez que toques código que involucre precios, verificá la unidad antes y después.
+
+---
+
+### Bug 1 — Precio 100x más barato en vista admin de planes
+
+**Síntoma:** Al crear un plan con precio "30", la vista `/admin/products/[id]/plans` mostraba `$0.30/mes`. La tienda pública mostraba `$30.00/mo` correctamente y Stripe cobraba $30 correctamente.
+
+**Causa:** Doble división por 100. El flujo completo:
+1. Admin escribe "30" → `PlansManager` convierte a centavos: `Math.round(30 * 100) = 3000` → guarda 3000 en DB ✓
+2. `formatCurrency(value)` divide por 100 internamente → `formatCurrency(3000) = $30.00` ✓
+3. Pero `PlansManager` línea 118 hacía `formatCurrency(plan.price / 100)` → `formatCurrency(3000/100)` → `formatCurrency(30)` → `30/100 = $0.30` ✗
+
+**Fix:** `components/admin/PlansManager.tsx` línea 118:
+```tsx
+// Antes (bug):
+{plan.price === 0 ? 'Gratis' : formatCurrency(plan.price / 100)}
+
+// Después (correcto):
+{plan.price === 0 ? 'Gratis' : formatCurrency(plan.price)}
+```
+
+**Verificación post-fix:** se buscaron todos los usos de `formatCurrency` en el proyecto — ningún otro caso tiene doble división.
+
+---
+
+### Bug 2 — LicenseCard mostraba "Expires" para suscripciones activas
+
+**Síntoma:** En `/dashboard/licenses` la tarjeta de una suscripción activa mostraba `"Expires Apr 12, 2026"`. En `/dashboard/licenses/[id]` el detalle mostraba `"Renews Apr 12, 2026"` (correcto, arreglado en Sesión 12). Inconsistencia entre la tarjeta y el detalle.
+
+**Causa:** `LicenseCard.tsx` usaba hardcodeado `"Expires"` para toda fecha de expiración, sin considerar el tipo de licencia ni `cancel_at_period_end`.
+
+**Fix:** `components/licenses/LicenseCard.tsx` — se añadió lógica de label contextual:
+```tsx
+const expiresLabel =
+  isSubscription && isActive && !license.cancel_at_period_end
+    ? 'Renews'
+    : isSubscription && license.cancel_at_period_end
+    ? 'Cancels'
+    : 'Expires'
+```
+Además, cuando `cancel_at_period_end === true` el texto se muestra en `text-orange-600` para consistencia visual con el banner del detail page.
+
+---
+
+## Sesión 15 — Descartar licencias gratuitas desde el dashboard
+
+### Contexto y decisiones de diseño
+
+Los planes con `price = 0` y los trials generan licencias que nunca desaparecen solas del dashboard. Como los trials no tienen ningún job automático que cambie su status a `expired` al vencer la fecha (`expires_at` pasa pero el status queda como `trial` en DB), podían bloquear indefinidamente la re-compra del mismo plan (el check de 1-por-plan bloquea `active` y `trial`).
+
+**Decisiones tomadas:**
+- **Acción = `revoked` con `revocation_reason = 'Discarded by user'`** — mantiene audit trail, el admin puede distinguirlo de una revocación administrativa, y el usuario puede re-comprar (solo `active`/`trial` bloquean).
+- **Condición de elegibilidad = `!stripe_subscription_id && status in ('active', 'trial')`** — solo licencias sin Stripe asociado. Las suscripciones pagas tienen su propio flujo (`CancelSubscriptionButton`).
+- **Dashboard filtra `revoked`** — licencias descartadas desaparecen de la lista del usuario. El admin sigue viéndolas en `/admin/licenses` con el motivo visible.
+- **`expired` permanece visible** — tiene valor psicológico de motivar re-compra.
+
+### Archivos modificados / creados
+
+**`app/dashboard/licenses/page.tsx`** — añadido `.neq('status', 'revoked')` a la query para excluir licencias descartadas de la vista del usuario.
+
+**`app/api/licenses/[id]/discard/route.ts`** (nuevo — `POST /api/licenses/[id]/discard`):
+1. Verifica sesión del usuario
+2. Obtiene la licencia filtrando por `id` + `user_id` (anti-IDOR)
+3. Valida: `stripe_subscription_id = null` y `status in ('active', 'trial')`
+4. Actualiza: `status = 'revoked'`, `revoked_at = now()`, `revocation_reason = 'Discarded by user'`
+
+**`components/licenses/DiscardLicenseButton.tsx`** (nuevo, Client Component):
+- Botón "Discard license" con ícono `Trash2` y colores destructive
+- `AlertDialog` de confirmación antes de actuar
+- En éxito → `router.push('/dashboard/licenses')` (la licencia no aparece en la lista)
+
+**`app/dashboard/licenses/[id]/page.tsx`** — import de `DiscardLicenseButton` + bloque condicional:
+```tsx
+{!license.stripe_subscription_id && isActive && (
+  <DiscardLicenseButton licenseId={license.id} />
+)}
+```

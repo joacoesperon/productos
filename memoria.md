@@ -1130,3 +1130,271 @@ Los planes con `price = 0` y los trials generan licencias que nunca desaparecen 
   <DiscardLicenseButton licenseId={license.id} />
 )}
 ```
+
+---
+
+## Sesión 16 — Sistema de trials mejorado: 1 trial por cuenta y suscripciones con trial de Stripe
+
+### Contexto y motivación
+
+El sistema de trials original tenía dos problemas fundamentales. Primero, no había ningún límite real de un trial por cuenta: como el botón "Discard" (Sesión 15) cambia el status a `revoked`, el check de licencia activa dejaba de bloquear, permitiendo al usuario obtener el trial repetidamente simplemente descartando el anterior. Segundo, no había ningún mecanismo para convertir un trial en suscripción de pago de forma automática — un plan de tipo `subscription` con `trial_days > 0` simplemente ofrecía la suscripción sin período de prueba.
+
+### Diseño previo — opciones evaluadas
+
+Se analizaron varias dimensiones del problema:
+
+**1. ¿Dónde hacer el check de 1 trial por cuenta?**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Check en cualquier status histórico | Buscar ANY licencia con `type = 'trial'` para ese plan, sin filtrar por status | ✅ Elegida — cierra el exploit de discard+retry |
+| B — Check solo en `active`/`trial` | El check original | ❌ Descartada — un discard lo bypass inmediatamente |
+
+Se optó por: si existe CUALQUIER licencia histórica con `type = 'trial'` para ese `license_plan_id` y ese `user_id`, independientemente del status, el checkout devuelve 409.
+
+**2. ¿Verificación de tarjeta para trials gratuitos (tipo `trial`)?**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Sin tarjeta | Trial standalone gratuito sin requerir pago | ✅ Elegida — máxima conversión, mínima fricción |
+| B — Con tarjeta, cobro diferido | Guardar método de pago para cobrar al terminar | ❌ Descartada — alto ROI técnico, bajo ROI de negocio para productos de una sola compra |
+
+Se decidió no requerir tarjeta para trials standalone (tipo `trial`). El riesgo de multi-cuenta abuse se aceptó como tolerable dado que estos trials son gratuitos de todas formas.
+
+**3. ¿Cómo manejar suscripciones con período de prueba?**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Trial nativo de Stripe | `subscription_data: { trial_period_days }` + `payment_method_collection: 'always'` | ✅ Elegida — Stripe gestiona todo el ciclo automáticamente |
+| B — Perpetual trial + cobro manual | Trial sin Stripe + email al vencer | ❌ Descartada — complejidad manual innecesaria |
+| C — Trial standalone sin tarjeta | Igual que el trial tipo `trial` pero para planes subscription | ❌ Descartada — no se convierte en suscripción sola |
+
+Para planes `subscription` con `trial_days > 0` se usa el trial nativo de Stripe: se recoge la tarjeta de pago en el checkout (incluso para $0 inmediato), y Stripe cobra automáticamente cuando termina el trial. El evento `invoice.payment_succeeded` ya existía — renueva la licencia sin cambios.
+
+### Implementación
+
+**`app/api/checkout/route.ts`** — dos cambios:
+
+*Check de trial histórico:* Para `plan.type === 'trial'`, en lugar de buscar licencias `active/trial`, se busca **cualquier licencia con `type = 'trial'`** para ese plan:
+```typescript
+if (plan.type === 'trial') {
+  const { data: anyTrialLicense } = await supabaseAdmin
+    .from('licenses').select('id')
+    .eq('user_id', user.id)
+    .eq('license_plan_id', planId)
+    .eq('type', 'trial')
+    .maybeSingle()
+  if (anyTrialLicense) return NextResponse.json(
+    { error: 'You have already used your trial for this plan' },
+    { status: 409 }
+  )
+}
+```
+
+*Stripe trial session:* Para suscripciones con `trial_days > 0`:
+```typescript
+const hasStripeTrial = isSubscription && !!plan.trial_days && plan.trial_days > 0
+
+// En la creación de session:
+payment_method_collection: hasStripeTrial ? 'always' : undefined,
+...(hasStripeTrial && {
+  subscription_data: { trial_period_days: plan.trial_days! }
+})
+```
+`payment_method_collection: 'always'` fuerza la recolección de tarjeta aunque el total inmediato sea $0.
+
+**`lib/stripe/webhook-handlers.ts`** — detección de trial en webhook:
+
+Cuando llega `checkout.session.completed` para una suscripción con trial, la licencia debe crearse con `status: 'trial'` y `expires_at = now + trial_days`:
+```typescript
+const hasStripeTrial = plan.type === 'subscription' && !!plan.trial_days && plan.trial_days > 0
+const licenseStatus: 'trial' | 'active' = plan.type === 'trial' || hasStripeTrial ? 'trial' : 'active'
+const expiresAt = hasStripeTrial
+  ? addDays(new Date(), plan.trial_days!).toISOString()
+  : calculateExpiresAt(plan.type as LicensePlanType, plan.billing_interval, plan.trial_days)
+```
+Al terminar el trial, Stripe dispara `invoice.payment_succeeded` → el handler existente `handleInvoicePaymentSucceeded` actualiza `status: 'active'` y calcula el nuevo `expires_at` con el interval de facturación normal. No se requirió ningún cambio en ese handler.
+
+**`components/store/PlanCard.tsx`** — UI adaptativa para suscripción + trial:
+
+Se añadió la variable `hasStripeTrial = plan.type === 'subscription' && !!plan.trial_days && plan.trial_days > 0`. Para estos planes:
+- `priceLabel` muestra `"Free for N days"` en lugar del precio mensual
+- `priceSublabel` (nuevo) muestra `"then $X/mo"` debajo del precio principal
+- `buttonLabel` muestra `"Start N-day free trial"` en lugar de `"Subscribe — $X/mo"`
+- `displayBadge` muestra `"Free Trial"` en lugar de `"Subscription"`
+
+### Resultado y estado final
+
+Los planes de tipo `trial` ahora solo se pueden usar una vez por cuenta (cualquier status histórico bloquea la re-obtención). Los planes de suscripción con `trial_days > 0` se presentan como trials con tarjeta requerida: el usuario ve el precio como "Free for N days, then $X/mo", paga $0 en el checkout de Stripe, y al finalizar el trial Stripe cobra automáticamente sin intervención manual. Si cancela durante el trial, la suscripción termina sin cargo.
+
+---
+
+## Sesión 17 — Normalización del comportamiento de trials: no descartables, UI "Trial used"
+
+### Contexto y decisión de diseño
+
+Al probar el sistema de trials implementado en la Sesión 16, se identificaron dos problemas:
+
+1. **UI de la store mostraba el plan trial como "disponible"** incluso después de haberlo usado (porque `ownedPlanIds` solo miraba licencias con `status IN ('active', 'trial')`, y una licencia descartada tiene `status = 'revoked'`).
+2. **Toast de error hardcodeado**: `PlanSelector` ignoraba el cuerpo JSON de la respuesta 409 y siempre mostraba "You already have an active license for this plan", independientemente de si el error era "trial ya usado" u otro.
+3. **El botón "Discard" aparecía en licencias de tipo trial**, lo que no tiene sentido conceptualmente: un trial no se descarta, simplemente expira. Permitir descartarlo solo añade complejidad sin beneficio — el usuario pierde el trial y luego se encuentra con que no puede reclamarlo de nuevo.
+
+La decisión de diseño alineada con el estándar de la industria (Stripe, Notion, Linear): **los trials no se descartan**. Se usan durante N días y expiran solos. Una vez usados, el slot queda consumido para siempre. El botón "Discard" tiene sentido únicamente para licencias perpetuas gratuitas (donde el usuario puede querer "eliminar" un producto que reclamó por error).
+
+### Implementación
+
+**`app/dashboard/licenses/[id]/page.tsx`** — condición del botón Discard extendida con `license.type !== 'trial'`:
+```tsx
+{!license.stripe_subscription_id && isActive && license.type !== 'trial' && (
+  <DiscardLicenseButton licenseId={license.id} />
+)}
+```
+
+**`components/store/PlanSelector.tsx`** — tres cambios:
+- Toast de 409 lee el error real del JSON: `toast.error(data.error ?? 'You already have an active license for this plan')`
+- Nueva prop `usedTrialPlanIds?: string[]` para recibir planes con trial histórico
+- `handleSelect` rechaza silenciosamente planes con trial usado
+- `PlanCard` recibe `isTrialUsed` calculado como `usedTrialPlanIds.includes(plan.id) && !ownedPlanIds.includes(plan.id)`
+- Botón "Continue" no aparece para planes con trial usado
+
+**`components/store/PlanCard.tsx`** — nuevo estado `isTrialUsed`:
+- Tarjeta con `opacity-60`
+- Badge "Trial used" (gris)
+- Botón deshabilitado "Trial already used"
+
+**`app/products/[slug]/page.tsx`** — segunda query para trials históricos:
+```typescript
+const { data: trialLicenses } = await supabase
+  .from('licenses').select('license_plan_id')
+  .eq('user_id', user.id).eq('product_id', p.id).eq('type', 'trial')
+usedTrialPlanIds = trialLicenses?.map((l) => l.license_plan_id) ?? []
+```
+Esta query no filtra por status, por lo que captura cualquier licencia de tipo trial independientemente de si está activa, expirada o revocada.
+
+### Resultado y estado final
+
+El flujo de trials queda alineado con el estándar de la industria: 1 trial por cuenta, no descartable, expira naturalmente. En la store, un plan cuyo trial ya se usó muestra badge "Trial used" y botón deshabilitado. El botón "Discard" en el dashboard solo aparece para licencias perpetuas gratuitas (sin Stripe, tipo != 'trial').
+
+---
+
+## Sesión 18 — Eliminación de la feature "Discard license"
+
+### Contexto y decisión
+
+La feature "Discard license" (implementada en Sesión 15) fue concebida para que el usuario pudiera eliminar de su dashboard licencias de productos gratuitos que no quería. Sin embargo, al analizar el estándar de la industria y los problemas que generó, se decidió eliminarla completamente:
+
+1. **No existe en la industria.** Plataformas como Gumroad, LemonSqueezy o Payhip no tienen un concepto de "descartar" una licencia. Una licencia gratuita simplemente está en tu biblioteca para siempre; si no la usás, la ignorás.
+2. **Fue la raíz de toda la complejidad de los trials.** El exploit de discard+reclaim, la query histórica, `usedTrialPlanIds`, el status `revoked` para distinguir descartadas de revocadas por admin — todo surgió de esta feature.
+3. **La motivación original no era de producto.** El botón se añadió porque durante el desarrollo se necesitaba limpiar datos de prueba, no porque los usuarios reales lo necesiten.
+
+La única acción de usuario que sí existe en la industria y ya tenemos implementada es **cancelar suscripción** (`CancelSubscriptionButton`).
+
+### Archivos eliminados
+
+- **`components/licenses/DiscardLicenseButton.tsx`** — componente eliminado
+- **`app/api/licenses/[id]/discard/route.ts`** — API route eliminada
+
+### Archivos modificados
+
+- **`app/dashboard/licenses/[id]/page.tsx`** — removidos import y bloque condicional de `DiscardLicenseButton`
+- **`app/dashboard/licenses/page.tsx`** — removido `.neq('status', 'revoked')` de la query; las licencias revocadas por admin ahora son visibles al usuario (comportamiento correcto — el usuario debe saber si su licencia fue revocada)
+
+---
+
+## Sesión 19 — Ciclo de vida completo de licencias: pagos fallidos, emails transaccionales, cron y archivo
+
+### Contexto y motivación
+
+Tras la normalización del sistema de trials (Sesión 17) y la eliminación del botón "Discard license" (Sesión 18), se realizó un análisis comparativo del sistema frente a plataformas de referencia como Gumroad, LemonSqueezy y Paddle. Este análisis reveló cuatro brechas relevantes respecto al estándar de la industria.
+
+La primera era un problema de sincronización en la product page: un trial expirado en base de datos —cuyo campo `expires_at` ya había pasado— seguía bloqueando la compra de planes de pago, porque la query de la tienda calculaba `ownedPlanIds` filtrando únicamente por `status IN ('active', 'trial')` sin verificar si la fecha ya había pasado. El sistema de expiración automática sí existía —el verify API lo realiza al detectar una licencia vencida— pero nunca se llamaba desde la tienda.
+
+La segunda era la falta de gestión de pagos fallidos en suscripciones. Si Stripe no podía cobrar una renovación, la licencia permanecía como `active` durante todo el período de reintentos (hasta dos semanas), y el usuario no era notificado. En producción, esto implica que el usuario podría descubrir la pérdida de acceso solo cuando el período de gracia terminase, sin haber tenido oportunidad de actualizar su método de pago.
+
+La tercera era la ausencia total de emails transaccionales. El sistema no enviaba ningún email ante eventos relevantes del ciclo de vida de una licencia —fallos de pago, cancelaciones, expiración de trials—. Esto es funcionalidad considerada básica en cualquier SaaS comercial.
+
+La cuarta era la gestión del dashboard: a medida que un usuario acumula licencias (trials expirados, productos promocionales, planes descontinuados), el panel se llena de entradas irrelevantes sin ninguna forma de organización. Plataformas como Steam o itch.io permiten archivar o marcar como ocultas entradas de la biblioteca sin eliminarlas.
+
+---
+
+### Diseño previo — opciones evaluadas
+
+**Manejo de pagos fallidos (Feature B):**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Suspender con reintentos | Marcar como `suspended` y revertir a `active` si el pago se recupera | ✅ Elegida — ya teníamos el status `suspended` y el flujo de recuperación vía `invoice.payment_succeeded` |
+| B — Cancelar inmediatamente | Pasar la licencia a `expired` al primer fallo | ❌ Descartada — Stripe recomienda no cancelar durante el período de reintentos y perjudica al usuario |
+| C — No hacer nada | Esperar a `customer.subscription.deleted` para actuar | ❌ Descartada — el usuario queda sin información durante semanas |
+
+**Proveedor de email transaccional (Feature C):**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Resend + React Email | API REST limpia, templates como componentes React con tipado | ✅ Elegida — cohesión con el stack, developer experience excelente, dashboard con historial de emails |
+| B — SendGrid | Orientado a email marketing masivo | ❌ Descartada — API más compleja, tier gratuito más restrictivo, overkill para emails transaccionales |
+| C — nodemailer + SMTP | Envío directo con servidor SMTP externo | ❌ Descartada — añade dependencia de infraestructura, sin garantías de entregabilidad propias |
+
+**Cron para aviso de trial expirando (Feature D):**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Edge Function Deno → endpoint Next.js | La Edge Function es un dispatcher; toda la lógica vive en Next.js | ✅ Elegida — reutiliza los módulos y patrones del stack existente |
+| B — Todo en la Edge Function Deno | Reimplementar lookup, rendering y Resend en Deno | ❌ Descartada — React Email `render()` depende de `react-dom/server`, no disponible en Deno |
+| C — Vercel Cron Jobs | Endpoint HTTP con schedule en `vercel.json` | ❌ Descartada — crea dependencia de plataforma de despliegue |
+| D — pg_cron (Postgres) | Función PL/pgSQL con schedule | ❌ Descartada — no puede hacer llamadas HTTP a Resend directamente |
+
+**Ocultar licencias (Feature E):** la columna `hidden boolean NOT NULL DEFAULT false` se añadió directamente en `licenses`. La alternativa —una tabla separada de preferencias de UI por usuario— se descartó por añadir complejidad innecesaria para una única preferencia binaria.
+
+---
+
+### Planteamiento inicial vs. implementación real
+
+En Feature C, se planteó inicialmente que las funciones de envío recibirían directamente el `userId` y todos los datos del producto como parámetros, para evitar hacer más queries. Al implementarlo, se comprobó que esto trasladaba responsabilidad de lookup al caller (los webhook handlers), que tendría que conocer más del dominio de los emails de lo necesario. Se adoptó un diseño más encapsulado: todas las funciones de `send.tsx` reciben únicamente el `licenseId`, y una función privada `getEmailData` deriva internamente el email del usuario, el nombre del producto, el nombre del plan y `expires_at`. Los webhook handlers solo necesitan pasar el ID.
+
+En Feature D, el planteamiento inicial era incluir toda la lógica directamente en la Edge Function Deno. Al comenzar la implementación quedó claro que `@react-email/render` depende internamente de `react-dom/server`, que no está disponible en el runtime Deno de Supabase. Se pivotó al patrón dispatcher descrito arriba.
+
+---
+
+### Implementación
+
+**`app/products/[slug]/page.tsx`** — la query de `ownedPlanIds` recibió un filtro adicional con `or('expires_at.is.null,expires_at.gt.TIMESTAMP')`. Este filtro excluye de "owned" las licencias cuya fecha de expiración ya ha pasado, permitiendo que el usuario vea y compre los planes de pago aunque tenga un trial expirado en DB con `status='trial'`. La query de `usedTrialPlanIds`, en cambio, no lleva este filtro: para controlar que no se repita un trial sí interesa detectar incluso los históricos expirados.
+
+**`lib/stripe/webhook-handlers.ts`** — se añadieron tres cambios. Primero, el nuevo handler `handleInvoicePaymentFailed`, que extrae el `subscriptionId` desde `invoice.parent.subscription_details.subscription` (la estructura del Stripe API v2026, donde `invoice.subscription` ya no existe), busca la licencia por `stripe_subscription_id`, actualiza `status = 'suspended'`, registra un evento en `license_events` con `reason: 'payment_failed'` y despacha el email. Segundo, `handleInvoicePaymentSucceeded` se extendió para seleccionar también el campo `status` de la licencia y llamar a `sendPaymentRecoveredEmail` solo si el status previo era `suspended`, garantizando que el email de recuperación se envía únicamente cuando hay una suspensión anterior (no en cada renovación normal). Tercero, `handleSubscriptionUpdated` se extendió para también leer `cancel_at_period_end` antes del update y llamar a `sendSubscriptionCancelledEmail` solo cuando la transición es `false → true`, evitando emails duplicados en reconexiones o actualizaciones neutras.
+
+**`lib/email/send.tsx`** — archivo con extensión `.tsx` (es necesaria porque usa JSX para instanciar los componentes React Email). Cada función pública protege su ejecución completa en un bloque `try/catch` con `console.error`, de modo que cualquier fallo de red, de Resend o de lookup de DB no propague una excepción al webhook handler —lo que provocaría que Stripe reintentase el evento indefinidamente—. Si la variable `RESEND_API_KEY` no está configurada, las funciones retornan sin hacer nada, lo que permite trabajar localmente sin una cuenta Resend activa.
+
+**`app/api/internal/trial-reminder/route.ts`** — endpoint POST protegido con header `x-internal-secret`. Busca licencias con `status='trial'`, `expires_at` dentro del intervalo [ahora, ahora+3 días], y `metadata->>'trial_reminder_sent' IS NULL`. Para cada una, calcula los días restantes, llama a `sendTrialExpiringEmail`, y actualiza `metadata` fusionando el valor existente con `{ trial_reminder_sent: true }` para evitar reenvíos en ejecuciones futuras.
+
+**`supabase/functions/trial-expiry-reminder/index.ts`** — Edge Function Deno mínima. Lee `SITE_URL` e `INTERNAL_SECRET` de los secrets de Supabase, hace una llamada `fetch POST` al endpoint interno de Next.js y devuelve la respuesta. El schedule se configura en el dashboard de Supabase con el cron `0 9 * * *` (diario a las 09:00 UTC).
+
+**Feature E:** se añadió la columna `hidden boolean NOT NULL DEFAULT false` a la tabla `licenses` mediante migración. La ruta `PATCH /api/licenses/[id]/hide` aplica el filtro `user_id = auth.user.id` (anti-IDOR) y actualiza el campo. El dashboard de licencias pasa a ejecutar dos queries en paralelo con `Promise.all`: una para las licencias del modo actual (`hidden=false` o `hidden=true` según el query param `?show_hidden=1`) y otra para el conteo de licencias ocultas, que se muestra como enlace si es mayor que cero. El componente `HideLicenseButton` es un Client Component que hace la llamada PATCH y llama a `router.refresh()` para actualizar la vista sin recarga completa.
+
+---
+
+### Problemas técnicos
+
+> **Problema:** al importar `render` desde `@react-email/components`, TypeScript no encontraba la función exportada.
+>
+> **Causa:** `render` no está re-exportada desde `@react-email/components`; vive en la sub-dependency `@react-email/render`, instalada automáticamente pero que debe importarse directamente.
+>
+> **Solución:** cambiar el import a `import { render } from '@react-email/render'`.
+
+> **Problema:** el handler `handleSubscriptionUpdated` enviaba el email de cancelación en cada actualización del webhook, no solo al cancelar.
+>
+> **Causa:** el código actualizaba `cancel_at_period_end` en DB y luego llamaba al email condicionando únicamente en el valor nuevo (`subscription.cancel_at_period_end === true`), sin comparar con el estado previo en DB.
+>
+> **Solución:** se modificó la query inicial para incluir `cancel_at_period_end` en el select, permitiendo comparar `subscription.cancel_at_period_end && !license.cancel_at_period_end` antes de despachar el email.
+
+> **Problema:** no era posible filtrar por la ausencia de una clave en un campo JSONB con el cliente Supabase JS usando `.is()`.
+>
+> **Causa:** el path JSONB con operador `->>` no es compatible con el método `.is()` del cliente, que espera un nombre de columna simple.
+>
+> **Solución:** usar `.filter('metadata->>trial_reminder_sent', 'is', null)`, que pasa el filtro como expresión de path al operador PostgREST subyacente.
+
+---
+
+### Resultado y estado final
+
+El sistema dispone ahora de un ciclo de vida de licencias completamente instrumentado. Ante un fallo de pago, la licencia pasa a `suspended`, el usuario recibe un email explicando que el acceso se mantiene mientras Stripe reintenta el cobro. Si el pago se recupera, la licencia vuelve a `active` automáticamente y el usuario recibe confirmación. Si cancela una suscripción, recibe un email con la fecha exacta hasta la que mantiene acceso. Si su trial está a punto de expirar, recibe un aviso tres días antes gracias al cron diario. El dashboard permite además ocultar cualquier licencia que el usuario considere irrelevante, con posibilidad de restaurarla en cualquier momento desde `/dashboard/licenses?show_hidden=1`.
+

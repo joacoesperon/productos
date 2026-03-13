@@ -1398,3 +1398,130 @@ En Feature D, el planteamiento inicial era incluir toda la lógica directamente 
 
 El sistema dispone ahora de un ciclo de vida de licencias completamente instrumentado. Ante un fallo de pago, la licencia pasa a `suspended`, el usuario recibe un email explicando que el acceso se mantiene mientras Stripe reintenta el cobro. Si el pago se recupera, la licencia vuelve a `active` automáticamente y el usuario recibe confirmación. Si cancela una suscripción, recibe un email con la fecha exacta hasta la que mantiene acceso. Si su trial está a punto de expirar, recibe un aviso tres días antes gracias al cron diario. El dashboard permite además ocultar cualquier licencia que el usuario considere irrelevante, con posibilidad de restaurarla en cualquier momento desde `/dashboard/licenses?show_hidden=1`.
 
+---
+
+## Sesión 20 — Campo "días gratis" en formulario de plan de suscripción
+
+### Contexto y motivación
+
+En la Sesión 16 se implementó el soporte completo para suscripciones con trial nativo de Stripe: el checkout enviaba `subscription_data: { trial_period_days }`, el webhook creaba la licencia con `status='trial'`, y el sistema de emails notificaba al usuario cuando el período estaba por terminar. Sin embargo, toda esa infraestructura era inutilizable porque el formulario de creación de planes en el admin nunca exponía el campo `trial_days` para planes de tipo `subscription`. El campo solo aparecía al seleccionar el tipo `trial` (plan standalone gratuito). Un administrador que quisiera crear una suscripción con período de prueba no tenía forma de configurarlo desde la interfaz.
+
+---
+
+### Diseño previo — opciones evaluadas
+
+La única opción razonable era extender la condición existente en el formulario para mostrar `trial_days` también cuando el tipo seleccionado es `subscription`. No se consideró añadir un checkbox separado para activar el trial, ya que el campo numérico vacío ya comunica suficientemente que es opcional: si no se rellena, la suscripción arranca con cobro inmediato; si se rellena, se activa el trial de Stripe.
+
+Se planteó si era necesario añadir validación Zod para exigir `trial_days` cuando el tipo es `trial` standalone. Se decidió no añadirla para no sobrecargar el cambio; en la práctica el admin siempre lo completa y el campo tiene `min=1` en el input HTML.
+
+---
+
+### Implementación
+
+**`components/admin/LicensePlanForm.tsx`** — la condición `{watchType === 'trial' && ...}` que rodeaba el campo `trial_days` se cambió a `{(watchType === 'trial' || watchType === 'subscription') && ...}`. Se añadió lógica condicional dentro del campo para diferenciar el contexto:
+
+- **Label**: cuando el tipo es `subscription`, el label pasa a ser *"Días gratis antes del primer cobro (opcional)"*; cuando es `trial`, mantiene *"Días de prueba"*.
+- **Placeholder**: cuando el tipo es `subscription`, muestra *"Ej: 7, 14, 30…"* para orientar al admin.
+- **Descripción**: cuando el tipo es `subscription`, aparece un texto de ayuda: *"Se solicita tarjeta al registrarse. El cobro inicia al terminar el período de prueba."*
+
+No fue necesario modificar el schema Zod (ya aceptaba `trial_days` como opcional para cualquier tipo), ni la server action de creación/actualización (ya guardaba el campo en la DB), ni ninguna otra capa del sistema.
+
+---
+
+### Resultado y estado final
+
+El ciclo completo de una suscripción con trial está ahora totalmente accesible desde el admin. Al crear o editar un plan de suscripción, el campo de días de prueba aparece como campo opcional. Si se configura, los usuarios que suscriban ese plan verán el período de prueba en el checkout de Stripe (con tarjeta requerida desde el inicio), recibirán un aviso por email tres días antes del primer cobro, y su licencia pasará automáticamente de `trial` a `active` cuando Stripe procese el primer pago satisfactoriamente.
+
+---
+
+## Sesión 21 — Course viewer: curriculum builder en admin y player en dashboard
+
+### Contexto y motivación
+
+El tipo `course` ya existía como valor en `products.type` y el dashboard de licencias ya mostraba un botón "Go to course" en las licencias de tipo curso, pero la ruta `/dashboard/courses/[productId]` no existía y devolvía un 404. Tampoco existían en la base de datos estructuras para almacenar el contenido del curso (módulos y lecciones) ni el progreso del alumno. El sistema carecía de toda la capa de LMS (Learning Management System): ningún administrador podía crear contenido de curso, y ningún usuario podía consumirlo.
+
+El objetivo era construir el ciclo completo en dos partes: (1) un curriculum builder en el panel de administración para que el admin pueda estructurar el contenido, y (2) un course viewer en el dashboard del usuario para que el alumno consuma el curso y realice seguimiento de su progreso.
+
+---
+
+### Diseño previo — opciones evaluadas
+
+**Formato de vídeo:**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Embed por URL (YouTube/Vimeo) | El admin pega una URL pública; la plataforma la convierte a iframe en el render | ✅ Elegida — coste cero, infraestructura gestionada por terceros, sin límites de almacenamiento |
+| B — Upload directo al bucket de Supabase Storage | Vídeo almacenado en la plataforma, entregado con URL firmada | ❌ Descartada — coste de almacenamiento elevado, complejidad de codificación/streaming, innecesario cuando los proveedores gratuitos ya ofrecen CDN global |
+
+**Estructura de contenido:**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Módulos → Lecciones (dos niveles) | Cada curso tiene módulos que agrupan lecciones | ✅ Elegida — estándar de la industria (Udemy, Teachable, Thinkific), intuitivo para admin y alumno |
+| B — Solo lecciones (un nivel) | Sin agrupación por tema | ❌ Descartada — no escala para cursos con más de 10 lecciones; carece de organización temática |
+
+**Reordenamiento en el curriculum builder:**
+
+| Opción | Descripción | Decisión |
+|--------|-------------|----------|
+| A — Botones ▲▼ | Flechas de subir/bajar que hacen swap de `position` entre ítems adyacentes | ✅ Elegida — sin dependencias externas, implementación clara, suficiente para la escala esperada |
+| B — Drag & drop (react-beautiful-dnd, dnd-kit) | Arrastrar para reordenar | ❌ Descartada — añade una dependencia grande para funcionalidad no crítica; la UX para admin que construye curriculum no exige velocidad de reordenamiento |
+
+**Progreso del alumno:**
+
+La única opción razonable era una tabla `course_progress` con `UNIQUE(user_id, lesson_id)` para registrar qué lecciones ha completado cada usuario. El toggle se implementó como INSERT ON CONFLICT (marcar completa) y DELETE (desmarcar), lo que garantiza idempotencia sin race conditions.
+
+**Cómo proteger el acceso al contenido:**
+
+Se evaluó si la política RLS debería restringir el acceso a `course_modules` y `course_lessons` solo a usuarios con licencia activa. Se decidió dar acceso SELECT a todos los autenticados en la capa RLS, y hacer la verificación de licencia en la server component (`app/dashboard/courses/[productId]/page.tsx`), que redirige a `/dashboard/licenses` si no encuentra una licencia activa. Este enfoque es coherente con el patrón ya establecido en otras páginas del dashboard y simplifica las políticas RLS.
+
+---
+
+### Planteamiento inicial vs. implementación real
+
+El planteamiento inicial contemplaba un curriculum builder con drag & drop para reordenar módulos y lecciones. Durante la discusión de diseño previo a la implementación se descartó esta opción porque añadía una dependencia de peso (dnd-kit o react-beautiful-dnd) para funcionalidad no crítica. Los botones ▲▼ resultan suficientes para la escala de un curso típico (decenas de lecciones, no cientos) y no requieren ninguna librería adicional.
+
+La lógica de "posición actual de la lección" se planteó inicialmente en el server component directamente a partir de `searchParams.lesson`. Al implementarla, se añadió la lógica de fallback: si no hay `searchParams.lesson`, se selecciona la primera lección incompleta del primer módulo; si todas están completas, se vuelve a la primera lección del primer módulo. Este comportamiento proporciona una experiencia de retomar el curso más natural para el alumno.
+
+---
+
+### Implementación
+
+**`supabase/migration.sql`** — se añadieron tres tablas al final del archivo de migraciones acumulativo:
+
+- `course_modules`: `product_id`, `title`, `position` (entero para ordenación), `created_at`.
+- `course_lessons`: `module_id`, `product_id` (redundante respecto a la FK por módulo, pero facilita queries directas sin join), `title`, `video_url` (URL cruda de YouTube o Vimeo; la conversión a URL de embed se realiza en render), `content` (texto plano/markdown), `position`, timestamps.
+- `course_progress`: `user_id`, `lesson_id`, `product_id`, `completed_at`, con restricción `UNIQUE(user_id, lesson_id)` para garantizar un único registro de progreso por alumno por lección.
+
+También se añadieron índices en `(product_id)`, `(module_id)` y `(user_id, product_id)` para las queries más frecuentes, y políticas RLS que permiten SELECT a todos los autenticados para módulos y lecciones, y gestión propia del progreso para los usuarios.
+
+**`types/database.ts`** — se añadieron los tres tipos generados (`course_modules`, `course_lessons`, `course_progress`) con sus variantes Row, Insert y Update.
+
+**`types/index.ts`** — se exportaron los alias `CourseModule`, `CourseLesson`, `CourseProgress`, y el tipo compuesto `ModuleWithLessons = CourseModule & { course_lessons: CourseLesson[] }` utilizado en el player.
+
+**`lib/utils/course.ts`** — función `getEmbedUrl(url)` que convierte URLs de YouTube (`watch?v=` y `youtu.be/`) y Vimeo a URLs de iframe embebido. Devuelve `null` para cualquier otra URL, de modo que el componente no renderiza el iframe si no hay vídeo reconocible.
+
+**`app/admin/products/page.tsx`** — se añadió un botón "Curriculum" en la columna de acciones de cada fila de la tabla de productos, visible únicamente cuando `product.type === 'course'`. El botón enlaza a `/admin/products/[id]/curriculum`. Dado que la tabla ya tenía botones "Planes" y "Editar", este cambio siguió el mismo patrón sin tocar la estructura de la página.
+
+**`app/admin/products/[id]/curriculum/page.tsx`** — Server Component que también define ocho server actions: `createModule`, `updateModule`, `deleteModule`, `moveModule`, `createLesson`, `updateLesson`, `deleteLesson`, `moveLesson`. La lógica de reordenamiento (`move*`) obtiene todos los hermanos del ítem ordenados por `position`, localiza el ítem objetivo y su vecino inmediato, y realiza dos `UPDATE` para intercambiar sus valores de `position`. La página carga el producto (con 404 si no existe o no es de tipo `course`), y los módulos con sus lecciones ordenadas, pasándolo todo al componente cliente `CurriculumBuilder`.
+
+**`components/admin/CurriculumBuilder.tsx`** — Client Component que gestiona la interfaz completa del curriculum builder. Usa `useTransition` para deshabilitar botones mientras se ejecutan las server actions y `router.refresh()` para sincronizar el estado tras cada mutación. Cada módulo es expandible y muestra su lista de lecciones. Dispone de formularios inline para crear/editar módulos (solo `title`) y lecciones (`title`, `video_url`, `content`). Los botones ▲▼ están deshabilitados en los extremos de la lista para evitar operaciones sin efecto.
+
+**`app/api/courses/[productId]/progress/route.ts`** — API route POST que recibe `{ lesson_id, completed: boolean }`. Antes de ejecutar la operación, verifica: (1) que el usuario tiene sesión activa, (2) que posee una licencia con `status IN ('active', 'trial')` para el producto (anti-IDOR), y (3) que el `lesson_id` pertenece efectivamente al `productId` indicado. Para marcar completa usa `upsert` con `ignoreDuplicates: true`; para desmarcar usa `delete` filtrando por `user_id` y `lesson_id`.
+
+**`app/dashboard/courses/[productId]/page.tsx`** — Server Component de la vista de curso. Verifica que el producto existe y es de tipo `course`; verifica que el usuario tiene una licencia activa (`active` o `trial`) para ese producto, redirigiendo a `/dashboard/licenses` si no la tiene. Carga los módulos con sus lecciones ordenadas por `position`, y el progreso del usuario. Implementa la lógica de selección de lección inicial: usa `searchParams.lesson` si es válido; sino busca la primera lección sin entrada en `course_progress`; sino usa la primera lección del primer módulo.
+
+**`components/courses/CourseViewer.tsx`** — Client Component con layout de dos columnas: sidebar (288px, colapsable) y área de contenido principal. El sidebar muestra la barra de progreso (`completedCount / totalLessons`) y la lista de módulos con sus lecciones, indicando con `CheckCircle2` (verde) o `Circle` las lecciones completadas y pendientes respectivamente, y resaltando la lección activa. El área principal muestra el título de la lección, el iframe de vídeo en proporción 16:9 (si hay URL reconocible), el contenido textual, y los botones de navegación Anterior/Siguiente calculados desde la lista plana de todas las lecciones. El botón "Marcar como completada" realiza una actualización optimista del estado local (un `Set<string>` de IDs completados) y llama a la API de progreso; si la llamada falla, revierte el estado y muestra un toast de error. Al marcar completa una lección que tiene siguiente, el componente navega automáticamente a la siguiente.
+
+---
+
+### Problemas técnicos
+
+No se encontraron problemas técnicos significativos durante esta sesión. Las únicas advertencias del diagnóstico de TypeScript eran pre-existentes (clases canónicas de Tailwind) y no afectaban a los archivos nuevos.
+
+---
+
+### Resultado y estado final
+
+El sistema dispone ahora de un LMS básico completamente funcional. Un administrador puede navegar a la página de curriculum de cualquier producto de tipo `course` y construir la estructura del curso: crear módulos temáticos, añadir lecciones a cada módulo con URL de vídeo de YouTube o Vimeo y/o texto explicativo, y reordenar tanto módulos como lecciones con los botones ▲▼. Un usuario con licencia activa de un curso puede acceder al player en `/dashboard/courses/[productId]`, ver el vídeo embebido de cada lección, leer el contenido de texto, marcar lecciones como completadas (con barra de progreso en tiempo real), navegar entre lecciones con los botones Anterior/Siguiente, y recargar la página manteniendo el progreso guardado en base de datos. Si el usuario no tiene licencia activa para el curso, es redirigido al dashboard de licencias.
+

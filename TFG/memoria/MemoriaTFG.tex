@@ -1,0 +1,164 @@
+%% -----------------------------------------------
+%% Memoria del Trabajo de Fin de Grado
+%% Grado en Ingeniería Informática — EPS UIB
+%% Codificación: UTF-8
+%% -----------------------------------------------
+
+\documentclass[spanish,GINF]{TFGEPSUIB}
+
+% Expresiones matemáticas
+\usepackage{amsmath,mathtools}
+
+% Fragmentos de código fuente con resaltado de sintaxis
+\usepackage{listings}
+
+% Cajas destacadas para notas, advertencias, etc.
+\usepackage{tcolorbox}
+
+% Lista de acrónimos
+\usepackage[printonlyused]{acronym}
+
+% Unidades de medida y números en tablas
+\usepackage{siunitx}
+
+% Definición del lenguaje TypeScript para listings
+\lstdefinelanguage{TypeScript}{
+  keywords={const,let,var,function,return,if,else,for,while,do,switch,
+            case,break,continue,new,typeof,instanceof,class,extends,
+            export,import,default,async,await,try,catch,finally,throw,
+            null,undefined,true,false,interface,type,enum,namespace,
+            readonly,public,private,protected,from,of,in,as},
+  keywordstyle=\color{blue}\bfseries,
+  ndkeywords={string,number,boolean,void,any,never,object,unknown,Promise},
+  ndkeywordstyle=\color{teal},
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{orange!80!black},
+  morestring=[b]",
+  morestring=[b]',
+  morestring=[b]`,
+}
+
+\lstdefinelanguage{SQL}{
+  keywords={SELECT,FROM,WHERE,JOIN,LEFT,RIGHT,INNER,ON,INSERT,INTO,VALUES,
+            UPDATE,SET,DELETE,CREATE,TABLE,ALTER,ADD,COLUMN,DROP,INDEX,
+            NOT,NULL,DEFAULT,PRIMARY,KEY,FOREIGN,REFERENCES,UNIQUE,
+            IF,EXISTS,AND,OR,IN,IS,LIKE,BETWEEN,ORDER,BY,GROUP,HAVING,
+            LIMIT,OFFSET,WITH,AS,RETURNS,LANGUAGE,SECURITY,DEFINER,
+            POLICY,ENABLE,ROW,LEVEL,FOR,ALL,USING,CHECK,TRIGGER,FUNCTION},
+  keywordstyle=\color{blue}\bfseries,
+  sensitive=false,
+  comment=[l]{--},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{orange!80!black},
+  morestring=[b]',
+}
+
+% Configuración global de listings
+\lstset{
+  basicstyle=\ttfamily\small,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  stepnumber=1,
+  numbersep=8pt,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  backgroundcolor=\color{gray!5},
+  captionpos=b,
+  tabsize=2,
+  showspaces=false,
+  showstringspaces=false,
+  literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+           {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+           {ñ}{{\~n}}1 {Ñ}{{\~N}}1,
+}
+
+% hyperref debe cargarse al final del preámbulo
+\usepackage[backref, colorlinks=true, allcolors=black]{hyperref}
+
+%% -----------------------------------------------
+%% Datos de la portada
+%% -----------------------------------------------
+
+% Título del TFG
+\title{Diseño e implementación de una plataforma web para la venta de productos digitales con gestión de licencias y pagos integrados}
+
+% Nombre completo del autor
+\author{[Nombre completo del autor]}
+
+% Nombre del tutor/tutora
+\tutor{[Nombre del tutor/tutora]}
+
+% Año académico
+\date{Año académico 2025-26}
+
+% Palabras clave (separadas por comas)
+\paraulesclau{plataforma web, productos digitales, gestión de licencias, comercio electrónico, Next.js, Supabase, Stripe, TypeScript}
+
+% Descomentar si NO se autoriza la publicación en abierto:
+%\autorfalse
+%\tutorfalse
+
+%% Para compilar solo algunos capítulos mientras se redacta:
+%\includeonly{Introduccion}
+
+\begin{document}
+
+\portada
+\portadainterior
+\frontmatter
+
+%% Agradecimientos (opcional — descomentar para activar)
+%\cleartorecto \thispagestyle{empty}
+%\begin{agraiments}
+%Texto de agradecimientos.
+%\end{agraiments}
+
+% Índice de contenidos
+\cleartorecto \tableofcontents
+
+% Lista de figuras (opcional)
+%\cleartorecto \listoffigures
+
+% Lista de tablas (opcional)
+%\cleartorecto \listoftables
+
+% Lista de acrónimos
+\include{Acronimos}
+
+% Resumen en español + Abstract en inglés
+\include{Resumen}
+
+%% -----------------------------------------------
+%% Cuerpo del trabajo
+%% -----------------------------------------------
+\mainmatter\pagestyle{ruled}
+
+\include{Introduccion}
+\include{EstadoArte}
+\include{Diseno}
+\include{Implementacion}
+\include{Pruebas}
+\include{Resultados}
+\include{Conclusiones}
+
+%% -----------------------------------------------
+%% Anexos
+%% -----------------------------------------------
+\appendix
+\include{Anexos}
+
+%% -----------------------------------------------
+%% Bibliografía
+%% -----------------------------------------------
+\backmatter
+\bibliographystyle{IEEEtran}
+\bibliography{Bibliografia}
+
+\end{document}
